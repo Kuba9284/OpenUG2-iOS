@@ -1,0 +1,94 @@
+# XcodeGen spec -- `brew install xcodegen && xcodegen generate` (in this folder) writes OpenUG2.xcodeproj.
+name: OpenUG2
+options:
+  bundleIdPrefix: com.example          # change me, or set the bundle id in Signing & Capabilities
+  deploymentTarget:
+    iOS: "13.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+
+targets:
+  OpenUG2:
+    type: application
+    platform: iOS
+    sources:
+      - path: ../src                   # the engine: C99, no changes needed beyond the OPENUG2_* hooks
+        includes: ["**/*.c", "**/*.h"]
+        excludes:
+          - "rhi_vk.c"                 # Vulkan backend: offscreen-only for now
+          - "vk_ui_stubs.c"
+      - path: ios_platform.m
+      - path: ios_platform.h
+    preBuildScripts:
+      - name: Generate embedded shader headers
+        script: '"${SRCROOT}/gen_headers.sh"'
+        basedOnDependencyAnalysis: false
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: OpenUG2
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        UIFileSharingEnabled: true               # Documents shows up in Finder / Files: copy the game data there
+        LSSupportsOpeningDocumentsInPlace: true
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: false
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIApplicationSupportsIndirectInputEvents: true
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.openug2
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GCC_C_LANGUAGE_STANDARD: gnu99            # the Makefile's -std=c99 plus _DEFAULT_SOURCE
+        CLANG_ENABLE_OBJC_ARC: YES
+        ENABLE_USER_SCRIPT_SANDBOXING: NO         # gen_headers.sh writes into ../src
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - N2_GLES=1                             # OpenGL ES 2.0 backend (+ GLSL ES shaders)
+          - OPENUG2_IOS=1
+          - OPENUG2_TOUCH=1
+          - OPENUG2_MENU=1                        # start menu (free roam / race select): no command line on iOS
+          - GLES_SILENCE_DEPRECATION=1
+          # - OPENUG2_IOS_HIGHDPI=1               # render at native Retina pixels (heavier)
+          - $(inherited)
+        GCC_WARN_INHIBIT_ALL_WARNINGS: NO
+        OTHER_CFLAGS: ["-Wno-unused-function"]
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/compat"                   # openssl/sha.h -> CommonCrypto, must come first
+          - "$(SRCROOT)"
+          - "$(SRCROOT)/../src"
+          - "$(SRCROOT)/deps/src/SDL/include"
+          - "$(SRCROOT)/deps/out/$(PLATFORM_NAME)/include"
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/deps/out/$(PLATFORM_NAME)/lib"
+        OTHER_LDFLAGS: ["-lSDL2", "-lpng16", "-lz", "-lm", "-ObjC"]
+        ONLY_ACTIVE_ARCH: NO
+    dependencies:
+      - sdk: AudioToolbox.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreAudio.framework
+      - sdk: CoreBluetooth.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreHaptics.framework
+      - sdk: CoreMotion.framework
+      - sdk: CoreVideo.framework
+      - sdk: Foundation.framework
+      - sdk: GameController.framework
+      - sdk: Metal.framework
+      - sdk: OpenGLES.framework
+      - sdk: QuartzCore.framework
+      - sdk: UIKit.framework
+
+schemes:
+  OpenUG2:
+    build:
+      targets:
+        OpenUG2: all
+    run:
+      config: Release          # the engine is far too slow in an unoptimised Debug build
+    archive:
+      config: Release

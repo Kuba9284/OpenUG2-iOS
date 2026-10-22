@@ -105,3 +105,9 @@ tools/capture_vehicle_shots.sh
 /src/ugui/DESIGN*.md
 /src/ugui/HANDOFF.md
 /.agents
+
+# iOS build outputs (ios/): downloaded dependencies, generated Xcode project and plist
+ios/deps/
+ios/build/
+ios/OpenUG2.xcodeproj/
+ios/Info.plist

@@ -6,6 +6,9 @@
 #include <string.h>
 
 #include "controls_store.h"
+#ifdef OPENUG2_TOUCH
+#include "touch_ios.h"   /* iOS on-screen controls feed the same queries */
+#endif
 
 #define AXIS_DEADZONE 0.15f
 
@@ -174,6 +177,9 @@ int cx_action_down(const CxInput *c, const Uint8 *keys, int action) {
     int k[2];
     int n = cb_kb_keys(&c->b.kb, action, k);
     for (int i = 0; i < n; i++) if (keys && keys[k[i]]) return 1;
+#ifdef OPENUG2_TOUCH
+    if (touch_action_down(action)) return 1;   /* on-screen buttons (iOS) */
+#endif
     return pad_action_down(c, action);
 }
 
@@ -265,6 +271,9 @@ float cx_throttle(const CxInput *c, const Uint8 *keys) {
 float cx_steer(const CxInput *c, const Uint8 *keys) {
     float s = (cx_action_down(c, keys, CB_ACT_STEER_LEFT) ? 1.0f : 0.0f) - (cx_action_down(c, keys, CB_ACT_STEER_RIGHT) ? 1.0f : 0.0f);
     if (s != 0.0f) return s;
+#ifdef OPENUG2_TOUCH
+    { float t = touch_steer(); if (t != 0.0f) return t; }   /* on-screen steering strip (iOS) */
+#endif
     for (int i = 0; i < CB_MAX_PADS; i++) {
         const StInputDevice *d = &c->b.pad[i].dev;
         if (!c->b.pad[i].present || !d->assigned[CB_ROLE_STEER]) continue;
