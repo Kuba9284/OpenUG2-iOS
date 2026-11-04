@@ -1,0 +1,950 @@
+From 426af88970c13201772ed76da1bbe88640ea49ad Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 09:45:43 +0200
+Subject: [PATCH] Add an iOS port: SDL2 + GLES2 front end with touch controls
+
+- ios/: platform layer (Documents folder as data/working dir, landscape
+  hints, background handling), CommonCrypto shim for openssl/sha.h,
+  XcodeGen project, dependency build script (SDL2 + libpng), shader
+  header generator, unsigned-IPA script and README
+- src/touch_ios.[ch]: on-screen steering strip and buttons, D-pad layout
+  for the start/pause menus; feeds the existing cx_* input queries
+- main.c / controls_sdl.c: small hooks, all behind OPENUG2_IOS /
+  OPENUG2_TOUCH so desktop builds are unchanged
+
+Syntax-checked against the iOS defines only; not yet built or run on a
+device.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LSahWgiTPbYdzsKrVoLXjS
+---
+ .gitignore               |   6 +
+ ios/README.md            |  78 +++++++++++
+ ios/build_deps.sh        |  56 ++++++++
+ ios/compat/openssl/sha.h |  21 +++
+ ios/gen_headers.sh       |  32 +++++
+ ios/ios_platform.h       |  39 ++++++
+ ios/ios_platform.m       |  42 ++++++
+ ios/make_ipa.sh          |  17 +++
+ ios/project.yml          |  95 +++++++++++++
+ src/controls_sdl.c       |   9 ++
+ src/main.c               |  31 ++++-
+ src/touch_ios.c          | 294 +++++++++++++++++++++++++++++++++++++++
+ src/touch_ios.h          |  43 ++++++
+ 13 files changed, 762 insertions(+), 1 deletion(-)
+ create mode 100644 ios/README.md
+ create mode 100755 ios/build_deps.sh
+ create mode 100644 ios/compat/openssl/sha.h
+ create mode 100755 ios/gen_headers.sh
+ create mode 100644 ios/ios_platform.h
+ create mode 100644 ios/ios_platform.m
+ create mode 100755 ios/make_ipa.sh
+ create mode 100644 ios/project.yml
+ create mode 100644 src/touch_ios.c
+ create mode 100644 src/touch_ios.h
+
+diff --git a/.gitignore b/.gitignore
+index e5174dd..137aa97 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -104,3 +104,9 @@ tools/capture_vehicle_shots.sh
+ /cleanroom/
+ /src/ugui/DESIGN*.md
+ /src/ugui/HANDOFF.md
++
++# iOS build outputs (ios/): downloaded dependencies, generated Xcode project and plist
++ios/deps/
++ios/build/
++ios/OpenUG2.xcodeproj/
++ios/Info.plist
+diff --git a/ios/README.md b/ios/README.md
+new file mode 100644
+index 0000000..a91c97c
+--- /dev/null
++++ b/ios/README.md
+@@ -0,0 +1,78 @@
++# OpenUG2 on iOS
++
++An iOS front end for [OpenUG2](../README.md): SDL2 + OpenGL ES 2.0, on-screen touch controls, game data
++from the app's Documents folder. **You supply your own copy of NFSU2** (OpenUG2 ships no EA assets).
++
++> Status: untested on a device when this was written. It was syntax-checked against the iOS defines only.
++> Expect to fix a few build errors on the first compile; the engine itself is an early prototype
++> (driving, traffic and some races work; there is no full career).
++
++## What you need
++- A Mac (a Hackintosh is fine) with Xcode and its command line tools
++- `brew install cmake xcodegen`
++- An iPhone/iPad with iOS 13 or newer
++- The NFSU2 files from your own DVD/install: the folders OpenUG2 reads (`TRACKS/`, `CARS/`, and the rest of
++  the data directory the desktop build is pointed at)
++
++## 1. Build the libraries (once)
++```sh
++cd ios
++./build_deps.sh                         # device (arm64): SDL2 + libpng -> deps/out/iphoneos
++SDK=iphonesimulator ./build_deps.sh     # optional, Apple-silicon simulator
++```
++SHA-256 comes from Apple's CommonCrypto (`compat/openssl/sha.h`), so there is no OpenSSL to build.
++
++## 2. Generate the Xcode project and build
++```sh
++xcodegen generate
++open OpenUG2.xcodeproj
++```
++In Xcode: select the **OpenUG2** target, **Signing & Capabilities**, choose your Team and change the bundle
++identifier to something unique (a free Apple ID works). Pick your device and Run. The scheme builds
++**Release** on purpose: the engine is far too slow unoptimised.
++
++## 3. Put the game data on the device
++The app's **Documents** folder is the data directory and the working directory (settings and key bindings
++are written there too).
++- Finder (macOS): select the iPhone, **Files** tab, drag your NFSU2 folders onto **OpenUG2**
++- or the **Files** app: *On My iPhone > OpenUG2*
++
++The default car and track are the engine's defaults (`CARS/HUMMER`, `TRACKS/STREAML4RA`), so those must be
++present. The start menu offers **Free Roam** and **Race Select**.
++
++## Controls
++| Where | What |
++|---|---|
++| Left strip | Steering: slide your finger left/right of the strip's centre (analog) |
++| Bottom right | **GAS** (big, corner), **BRK**, **NOS**, **HB** (handbrake) |
++| Top row | **PAUSE**, **CAM**, **RESET**, **LOOK** (look back) |
++| Menus (start + pause) | D-pad on the left, **OK** and **BACK** on the right |
++
++The buttons send whatever keys the Controls screen has bound, so rebinding there still works. A Bluetooth
++controller works too (SDL game controller support is on).
++
++## Installing without Xcode on every refresh
++A free Apple ID signs apps for **7 days** and allows 3 active sideloaded apps; that is an Apple rule, not
++something this project can change. Options:
++
++1. **Unsigned IPA + a sideloading tool.** `./make_ipa.sh` writes `build/OpenUG2-unsigned.ipa`. Install it
++   with SideStore, AltStore or Sideloadly, which re-sign it with your own Apple ID.
++   - SideStore refreshes in the background on the device itself after a one-time computer-assisted setup
++     (it needs the LocalDevVPN app). Free accounts: 3 active apps (SideStore counts as one), 10 App IDs
++     per week. See <https://docs.sidestore.io/docs/faq>.
++   - AltStore Classic also works with a free Apple ID (3 active apps): <https://faq.altstore.io/altstore-classic/activating-apps>.
++2. **Paid Apple Developer account ($99/year):** apps last 365 days and the 3-app limit goes away.
++3. Plain Xcode with a free account: works, but you must re-run it every 7 days.
++
++## Settings worth knowing
++- `OPENUG2_IOS_HIGHDPI=1` (in `project.yml`): render at native Retina pixels. Default is points, because
++  the world draws ~930 m of view and fill rate is the first limit on a phone.
++- GL ES 2.0 is deprecated by Apple but still works (`GLES_SILENCE_DEPRECATION` is set). If a future iOS
++  drops it, the fallback is ANGLE (GLES2 on top of Metal).
++- Textures are CPU-decoded to RGBA: iOS GPUs have no S3TC, and the engine already has this fallback.
++  Expect higher memory use than desktop.
++
++## What changed in the engine
++Everything is behind `#ifdef OPENUG2_IOS` / `OPENUG2_TOUCH`, so desktop builds are unchanged:
++`src/main.c` (hooks), `src/controls_sdl.c` (two queries ask the touch layer), plus the new
++`src/touch_ios.[ch]`, `ios/ios_platform.[hm]` and `ios/compat/`.
+diff --git a/ios/build_deps.sh b/ios/build_deps.sh
+new file mode 100755
+index 0000000..9b5e8cd
+--- /dev/null
++++ b/ios/build_deps.sh
+@@ -0,0 +1,56 @@
++#!/bin/bash
++# Builds the two libraries OpenUG2 needs, as static iOS libraries, into ios/deps/out/<sdk>/:
++#   SDL2    (windowing, GLES context, touch, audio, game controllers) -- SDL's own "Static Library-iOS" target
++#   libpng  (UI glyph/button images) -- CMake; zlib comes from the iOS SDK
++# SHA-256 (the only OpenSSL use) is served by CommonCrypto through ios/compat, so there is no libcrypto.
++#
++# Usage:  ./build_deps.sh                       device (arm64)
++#         SDK=iphonesimulator ./build_deps.sh   Apple-silicon simulator
++# Needs:  Xcode command line tools, cmake, git (brew install cmake)
++set -euo pipefail
++cd "$(dirname "$0")"
++
++SDK=${SDK:-iphoneos}
++DEPLOY=${DEPLOY:-13.0}
++SDL_TAG=${SDL_TAG:-release-2.30.12}
++PNG_TAG=${PNG_TAG:-v1.6.43}
++
++case "$SDK" in iphoneos|iphonesimulator) ;; *) echo "SDK must be iphoneos or iphonesimulator" >&2; exit 1;; esac
++command -v cmake >/dev/null || { echo "cmake not found: brew install cmake" >&2; exit 1; }
++
++ROOT=$PWD
++SRC=$ROOT/deps/src
++BUILD=$ROOT/deps/build
++OUT=$ROOT/deps/out/$SDK
++SDKPATH=$(xcrun --sdk "$SDK" --show-sdk-path)
++mkdir -p "$SRC" "$BUILD" "$OUT/lib" "$OUT/include"
++
++fetch() {   # name url tag
++    [ -d "$SRC/$1/.git" ] || git clone --depth 1 --branch "$3" "$2" "$SRC/$1"
++}
++
++echo "== SDL2 ($SDL_TAG) for $SDK"
++fetch SDL https://github.com/libsdl-org/SDL.git "$SDL_TAG"
++xcodebuild -project "$SRC/SDL/Xcode/SDL/SDL.xcodeproj" -target "Static Library-iOS" \
++    -configuration Release -sdk "$SDK" ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
++    IPHONEOS_DEPLOYMENT_TARGET="$DEPLOY" BUILD_DIR="$BUILD/sdl-$SDK" \
++    CODE_SIGNING_ALLOWED=NO build | tail -n 5
++LIBSDL=$(find "$BUILD/sdl-$SDK" -name libSDL2.a | head -n 1)
++[ -n "$LIBSDL" ] || { echo "libSDL2.a was not produced" >&2; exit 1; }
++cp "$LIBSDL" "$OUT/lib/libSDL2.a"
++
++echo "== libpng ($PNG_TAG) for $SDK"
++fetch libpng https://github.com/pnggroup/libpng.git "$PNG_TAG"
++cmake -S "$SRC/libpng" -B "$BUILD/png-$SDK" \
++    -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$SDK" -DCMAKE_OSX_ARCHITECTURES=arm64 \
++    -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOY" -DCMAKE_BUILD_TYPE=Release \
++    -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
++    -DCMAKE_INSTALL_PREFIX="$OUT" \
++    -DZLIB_LIBRARY="$SDKPATH/usr/lib/libz.tbd" -DZLIB_INCLUDE_DIR="$SDKPATH/usr/include" \
++    -DPNG_SHARED=OFF -DPNG_STATIC=ON -DPNG_TESTS=OFF -DPNG_TOOLS=OFF -DPNG_EXECUTABLES=OFF -DPNG_FRAMEWORK=OFF
++cmake --build "$BUILD/png-$SDK" --config Release --target install -j 4
++# the static library is installed as libpng16.a with a libpng.a alias; make sure the name we link exists
++[ -f "$OUT/lib/libpng16.a" ] || cp "$(find "$OUT/lib" -name 'libpng*.a' | head -n 1)" "$OUT/lib/libpng16.a"
++
++echo "== done: $OUT"
++ls -la "$OUT/lib"
+diff --git a/ios/compat/openssl/sha.h b/ios/compat/openssl/sha.h
+new file mode 100644
+index 0000000..8d370dd
+--- /dev/null
++++ b/ios/compat/openssl/sha.h
+@@ -0,0 +1,21 @@
++/* compat/openssl/sha.h -- iOS shim: the only OpenSSL call OpenUG2 makes is SHA256()
++ * (src/ugui/ugui_glyph_folder.c), so on iOS it is served by Apple's CommonCrypto
++ * instead of building and linking libcrypto. Put ios/compat on the header search
++ * path BEFORE any system include path. */
++#ifndef OPENUG2_IOS_COMPAT_OPENSSL_SHA_H
++#define OPENUG2_IOS_COMPAT_OPENSSL_SHA_H
++
++#include <CommonCrypto/CommonDigest.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#define SHA256_DIGEST_LENGTH CC_SHA256_DIGEST_LENGTH
++
++/* Same contract as OpenSSL's: writes 32 bytes to md and returns md, or NULL on failure. */
++static inline unsigned char *SHA256(const unsigned char *d, size_t n, unsigned char *md) {
++    if (!md || (!d && n) || n > (size_t)UINT32_MAX) return NULL;   /* CC_LONG is 32 bit */
++    CC_SHA256(d, (CC_LONG)n, md);
++    return md;
++}
++
++#endif
+diff --git a/ios/gen_headers.sh b/ios/gen_headers.sh
+new file mode 100755
+index 0000000..df70cfb
+--- /dev/null
++++ b/ios/gen_headers.sh
+@@ -0,0 +1,32 @@
++#!/bin/sh
++# Regenerates src/generated_shaders.h and src/generated_world_debug_shaders.h: the same output as the
++# Makefile rules of those names (the desktop build makes them with xxd; macOS ships xxd too).
++# Skips the work when both headers are newer than every shader, so incremental Xcode builds stay fast.
++set -eu
++cd "$(dirname "$0")/.."
++command -v xxd >/dev/null 2>&1 || { echo "gen_headers: xxd not found" >&2; exit 1; }
++
++up_to_date() {   # $1 = header, rest = inputs
++    out=$1; shift
++    [ -f "$out" ] || return 1
++    for f in "$@"; do [ "$f" -nt "$out" ] && return 1; done
++    return 0
++}
++
++SHADERS=$(ls src/shaders/*.vert src/shaders/*.frag | sort)
++
++if ! up_to_date src/generated_world_debug_shaders.h src/world_debug_120.vert src/world_debug_120.frag; then
++    {
++        echo "/* AUTO-GENERATED from world_debug_120.vert/.frag by make -- do not edit */"
++        xxd -i src/world_debug_120.vert
++        xxd -i src/world_debug_120.frag
++    } > src/generated_world_debug_shaders.h
++fi
++
++# shellcheck disable=SC2086
++if ! up_to_date src/generated_shaders.h $SHADERS; then
++    {
++        echo "/* AUTO-GENERATED from src/shaders/ by make -- do not edit */"
++        for f in $SHADERS; do xxd -i "$f" | sed 's/^unsigned/static const unsigned/'; done
++    } > src/generated_shaders.h
++fi
+diff --git a/ios/ios_platform.h b/ios/ios_platform.h
+new file mode 100644
+index 0000000..e749874
+--- /dev/null
++++ b/ios/ios_platform.h
+@@ -0,0 +1,39 @@
++/* ios_platform.h -- the small iOS layer around the engine (compiled only for iOS, -DOPENUG2_IOS).
++ *
++ * The engine is a command-line program: it takes the NFSU2 data directory as an argument and keeps its
++ * settings and output files in the working directory. An iOS app has neither, so this layer
++ *   - points the data directory and the working directory at the app's Documents folder (visible in the
++ *     Files app because the Info.plist enables file sharing -- copy the game's TRACKS/, CARS/, ... there);
++ *   - sets the SDL hints that have to be set before SDL_Init (landscape only, hidden home indicator);
++ *   - stops all GL work while the app is in the background (iOS terminates apps that draw there). */
++#ifndef OPENUG2_IOS_PLATFORM_H
++#define OPENUG2_IOS_PLATFORM_H
++
++#include <SDL.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Call first thing in main(), before SDL_Init. Sets the SDL hints, chdir()s into Documents and returns that
++ * directory (valid for the life of the process; never NULL -- "." if the lookup failed). */
++const char *ios_platform_init(void);
++
++/* Feed every SDL event through this. On SDL_APP_WILLENTERBACKGROUND it blocks until the app is foreground
++ * again (or quits), so the render loop makes no GL call while backgrounded. Returns 1 if it blocked. */
++int ios_platform_event(const SDL_Event *e);
++
++#ifdef __cplusplus
++}
++#endif
++
++/* Extra SDL_CreateWindow flags for iOS: full screen. Retina rendering is opt-in because the world draws
++ * ~930 m of view and fill rate is the first thing a phone runs out of: build with
++ * OPENUG2_IOS_HIGHDPI=1 to render at native pixels instead of points. */
++#ifdef OPENUG2_IOS_HIGHDPI
++#  define OPENUG2_EXTRA_WINDOW_FLAGS (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_BORDERLESS | SDL_WINDOW_ALLOW_HIGHDPI)
++#else
++#  define OPENUG2_EXTRA_WINDOW_FLAGS (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_BORDERLESS)
++#endif
++
++#endif
+diff --git a/ios/ios_platform.m b/ios/ios_platform.m
+new file mode 100644
+index 0000000..bdbbef5
+--- /dev/null
++++ b/ios/ios_platform.m
+@@ -0,0 +1,42 @@
++/* ios_platform.m -- see ios_platform.h */
++#import <Foundation/Foundation.h>
++#include <string.h>
++#include <unistd.h>
++#include <stdio.h>
++
++#include "ios_platform.h"
++
++static char g_docs[1024];
++
++const char *ios_platform_init(void) {
++    /* Hints are read when the video subsystem starts, so they go in before SDL_Init. */
++    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
++    SDL_SetHint(SDL_HINT_IOS_HIDE_HOME_INDICATOR, "2");        /* hidden, swipe once to reveal */
++    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");             /* touches drive the on-screen controls only, not the mouse path */
++    SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");      /* else SDL lists the accelerometer as a pad */
++
++    @autoreleasepool {
++        NSArray<NSString *> *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
++        const char *p = dirs.count ? dirs[0].fileSystemRepresentation : NULL;
++        if (p && strlen(p) < sizeof g_docs) strcpy(g_docs, p);
++    }
++    if (!g_docs[0]) { strcpy(g_docs, "."); return g_docs; }
++
++    /* Settings, controls and any file the engine writes with a relative path land in Documents too. */
++    if (chdir(g_docs) != 0) perror("openug2: chdir(Documents)");
++    return g_docs;
++}
++
++int ios_platform_event(const SDL_Event *e) {
++    if (e->type != SDL_APP_WILLENTERBACKGROUND) return 0;
++    /* SDL delivers this on the UI thread right before iOS suspends us. Any GL call after it kills the app,
++       so wait here -- inside the event handler, before the frame loop gets to draw again. */
++    SDL_Event ev;
++    while (SDL_WaitEvent(&ev)) {
++        if (ev.type == SDL_APP_DIDENTERFOREGROUND || ev.type == SDL_QUIT || ev.type == SDL_APP_TERMINATING) {
++            if (ev.type != SDL_APP_DIDENTERFOREGROUND) SDL_PushEvent(&ev);   /* let the loop see the quit */
++            break;
++        }
++    }
++    return 1;
++}
+diff --git a/ios/make_ipa.sh b/ios/make_ipa.sh
+new file mode 100755
+index 0000000..9de9d9c
+--- /dev/null
++++ b/ios/make_ipa.sh
+@@ -0,0 +1,17 @@
++#!/bin/sh
++# Builds an UNSIGNED .ipa (ios/build/OpenUG2-unsigned.ipa) for sideloading tools -- AltStore, SideStore,
++# Sideloadly -- which sign it with your own Apple ID, so no Xcode run is needed on each refresh.
++# Run ./build_deps.sh first (device libraries), and `xcodegen generate` once.
++set -eu
++cd "$(dirname "$0")"
++[ -d OpenUG2.xcodeproj ] || xcodegen generate
++xcodebuild -project OpenUG2.xcodeproj -scheme OpenUG2 -configuration Release \
++    -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
++    CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
++APP=build/Build/Products/Release-iphoneos/OpenUG2.app
++[ -d "$APP" ] || { echo "build did not produce $APP" >&2; exit 1; }
++rm -rf build/ipa build/OpenUG2-unsigned.ipa
++mkdir -p build/ipa/Payload
++cp -R "$APP" build/ipa/Payload/
++( cd build/ipa && zip -qry ../OpenUG2-unsigned.ipa Payload )
++echo "wrote $(pwd)/build/OpenUG2-unsigned.ipa"
+diff --git a/ios/project.yml b/ios/project.yml
+new file mode 100644
+index 0000000..6603963
+--- /dev/null
++++ b/ios/project.yml
+@@ -0,0 +1,95 @@
++# XcodeGen spec -- `brew install xcodegen && xcodegen generate` (in this folder) writes OpenUG2.xcodeproj.
++name: OpenUG2
++options:
++  bundleIdPrefix: com.example          # change me, or set the bundle id in Signing & Capabilities
++  deploymentTarget:
++    iOS: "13.0"
++  createIntermediateGroups: true
++  generateEmptyDirectories: false
++
++targets:
++  OpenUG2:
++    type: application
++    platform: iOS
++    sources:
++      - path: ../src                   # the engine: C99, no changes needed beyond the OPENUG2_* hooks
++        includes: ["**/*.c", "**/*.h"]
++        excludes:
++          - "rhi_vk.c"                 # Vulkan backend: offscreen-only for now
++          - "vk_offscreen_window_shim.c"
++          - "vk_ui_stubs.c"
++      - path: ios_platform.m
++      - path: ios_platform.h
++    preBuildScripts:
++      - name: Generate embedded shader headers
++        script: '"${SRCROOT}/gen_headers.sh"'
++        basedOnDependencyAnalysis: false
++    info:
++      path: Info.plist
++      properties:
++        CFBundleDisplayName: OpenUG2
++        CFBundleShortVersionString: "0.1"
++        CFBundleVersion: "1"
++        UIFileSharingEnabled: true               # Documents shows up in Finder / Files: copy the game data there
++        LSSupportsOpeningDocumentsInPlace: true
++        UIRequiresFullScreen: true
++        UIStatusBarHidden: true
++        UIViewControllerBasedStatusBarAppearance: false
++        UILaunchScreen: {}
++        UISupportedInterfaceOrientations:
++          - UIInterfaceOrientationLandscapeLeft
++          - UIInterfaceOrientationLandscapeRight
++        UIApplicationSupportsIndirectInputEvents: true
++        ITSAppUsesNonExemptEncryption: false
++    settings:
++      base:
++        PRODUCT_BUNDLE_IDENTIFIER: com.example.openug2
++        TARGETED_DEVICE_FAMILY: "1,2"
++        GCC_C_LANGUAGE_STANDARD: gnu99            # the Makefile's -std=c99 plus _DEFAULT_SOURCE
++        CLANG_ENABLE_OBJC_ARC: YES
++        ENABLE_USER_SCRIPT_SANDBOXING: NO         # gen_headers.sh writes into ../src
++        GCC_PREPROCESSOR_DEFINITIONS:
++          - N2_GLES=1                             # OpenGL ES 2.0 backend (+ GLSL ES shaders)
++          - OPENUG2_IOS=1
++          - OPENUG2_TOUCH=1
++          - OPENUG2_MENU=1                        # start menu (free roam / race select): no command line on iOS
++          - GLES_SILENCE_DEPRECATION=1
++          # - OPENUG2_IOS_HIGHDPI=1               # render at native Retina pixels (heavier)
++          - $(inherited)
++        GCC_WARN_INHIBIT_ALL_WARNINGS: NO
++        OTHER_CFLAGS: ["-Wno-unused-function"]
++        HEADER_SEARCH_PATHS:
++          - "$(SRCROOT)/compat"                   # openssl/sha.h -> CommonCrypto, must come first
++          - "$(SRCROOT)"
++          - "$(SRCROOT)/../src"
++          - "$(SRCROOT)/deps/src/SDL/include"
++          - "$(SRCROOT)/deps/out/$(PLATFORM_NAME)/include"
++        LIBRARY_SEARCH_PATHS:
++          - "$(SRCROOT)/deps/out/$(PLATFORM_NAME)/lib"
++        OTHER_LDFLAGS: ["-lSDL2", "-lpng16", "-lz", "-lm", "-ObjC"]
++        ONLY_ACTIVE_ARCH: NO
++    dependencies:
++      - sdk: AudioToolbox.framework
++      - sdk: AVFoundation.framework
++      - sdk: CoreAudio.framework
++      - sdk: CoreBluetooth.framework
++      - sdk: CoreGraphics.framework
++      - sdk: CoreHaptics.framework
++      - sdk: CoreMotion.framework
++      - sdk: CoreVideo.framework
++      - sdk: Foundation.framework
++      - sdk: GameController.framework
++      - sdk: Metal.framework
++      - sdk: OpenGLES.framework
++      - sdk: QuartzCore.framework
++      - sdk: UIKit.framework
++
++schemes:
++  OpenUG2:
++    build:
++      targets:
++        OpenUG2: all
++    run:
++      config: Release          # the engine is far too slow in an unoptimised Debug build
++    archive:
++      config: Release
+diff --git a/src/controls_sdl.c b/src/controls_sdl.c
+index 2ce2a69..22e39b7 100644
+--- a/src/controls_sdl.c
++++ b/src/controls_sdl.c
+@@ -6,6 +6,9 @@
+ #include <string.h>
+ 
+ #include "controls_store.h"
++#ifdef OPENUG2_TOUCH
++#include "touch_ios.h"   /* iOS on-screen controls feed the same queries */
++#endif
+ 
+ #define AXIS_DEADZONE 0.15f
+ 
+@@ -174,6 +177,9 @@ int cx_action_down(const CxInput *c, const Uint8 *keys, int action) {
+     int k[2];
+     int n = cb_kb_keys(&c->b.kb, action, k);
+     for (int i = 0; i < n; i++) if (keys && keys[k[i]]) return 1;
++#ifdef OPENUG2_TOUCH
++    if (touch_action_down(action)) return 1;   /* on-screen buttons (iOS) */
++#endif
+     return pad_action_down(c, action);
+ }
+ 
+@@ -265,6 +271,9 @@ float cx_throttle(const CxInput *c, const Uint8 *keys) {
+ float cx_steer(const CxInput *c, const Uint8 *keys) {
+     float s = (cx_action_down(c, keys, CB_ACT_STEER_LEFT) ? 1.0f : 0.0f) - (cx_action_down(c, keys, CB_ACT_STEER_RIGHT) ? 1.0f : 0.0f);
+     if (s != 0.0f) return s;
++#ifdef OPENUG2_TOUCH
++    { float t = touch_steer(); if (t != 0.0f) return t; }   /* on-screen steering strip (iOS) */
++#endif
+     for (int i = 0; i < CB_MAX_PADS; i++) {
+         const StInputDevice *d = &c->b.pad[i].dev;
+         if (!c->b.pad[i].present || !d->assigned[CB_ROLE_STEER]) continue;
+diff --git a/src/main.c b/src/main.c
+index 076a399..8483266 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -55,6 +55,15 @@
+ #include "settings.h"
+ #include "controls_sdl.h"
+ #include "ugui/ugui_gl.h"
++#ifdef OPENUG2_IOS
++#include "ios_platform.h"   /* Documents-folder data path, SDL hints, background handling */
++#endif
++#ifdef OPENUG2_TOUCH
++#include "touch_ios.h"     /* on-screen touch controls */
++#endif
++#ifndef OPENUG2_EXTRA_WINDOW_FLAGS
++#define OPENUG2_EXTRA_WINDOW_FLAGS 0   /* iOS adds fullscreen (ios_platform.h) */
++#endif
+ #ifdef OPENUG2_MENU
+ #include "frontend/frontend.h"
+ #include "frontend/frontend_draw.h"
+@@ -2284,6 +2293,9 @@ int main(int argc, char **argv) {
+          --no-tex-overrides  ignore --tex-overrides
+          --tex-override-budget MiB  GPU memory cap for overrides (default 1536) */
+     const char *dataroot = ".", *shot = NULL, *objdump = NULL, *carinfo = NULL;
++#ifdef OPENUG2_IOS
++    dataroot = ios_platform_init();   /* app Documents folder (also the working dir); an explicit DATA_DIR argument still wins */
++#endif
+     int render_width = 1920, render_height = 1080;
+     const char *xaudit = NULL;   /* --transform-audit REGION: GL-free placement forensics */
+     float shotyaw = 1e9f;        /* --shot-yaw DEG: fixed capture heading (M132) */
+@@ -3865,7 +3877,7 @@ int main(int argc, char **argv) {
+     SDL_Window *win = SDL_CreateWindow("OpenUG2",
+         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, render_width, render_height,
+         rhi_window_flags(RHI_BACKEND_DEFAULT) |
+-        (capture_window ? SDL_WINDOW_HIDDEN : SDL_WINDOW_RESIZABLE));
++        (capture_window ? SDL_WINDOW_HIDDEN : SDL_WINDOW_RESIZABLE) | OPENUG2_EXTRA_WINDOW_FLAGS);
+     if (!win) { fprintf(stderr,"window: %s\n",SDL_GetError()); return 1; }
+     /* The device also sets tightly packed readback rows (odd-width captures)
+        and the swap interval: audits pace explicitly, so no vsync for them. */
+@@ -3888,6 +3900,9 @@ int main(int argc, char **argv) {
+     for (int i = 0; i < SDL_NumJoysticks() && !controller; i++)
+         if (SDL_IsGameController(i)) controller = SDL_GameControllerOpen(i);
+     cx_init(&g_cx);                                      /* bindings: retail defaults, then the persisted ones */
++#ifdef OPENUG2_TOUCH
++    touch_init(&g_cx);
++#endif
+     if (perf_csv) pf_open(perf_csv);
+     /* S3TC lets car/rim TPK textures upload their DXT blocks directly
+        (glCompressedTexImage2D) instead of the CPU-decoded RGBA. */
+@@ -6489,6 +6504,12 @@ int main(int argc, char **argv) {
+         SDL_Event e;
+         while (SDL_PollEvent(&e)) {
+             if (e.type == SDL_QUIT) { running = 0; continue; }
++#ifdef OPENUG2_TOUCH
++            touch_handle_event(&e);   /* first: releases held buttons on backgrounding, before the wait below */
++#endif
++#ifdef OPENUG2_IOS
++            if (ios_platform_event(&e)) continue;   /* blocks while backgrounded: no GL there */
++#endif
+             uint32_t pad_edge = cx_joy_edges(&g_cx, &e);   /* every event, so hat state stays current while paused */
+             int pause_allowed = 1;
+ #ifdef OPENUG2_MENU
+@@ -11829,6 +11850,14 @@ int main(int argc, char **argv) {
+             SDL_GL_GetDrawableSize(win, &pw, &ph);
+             pause_menu_draw(pause_menu, pw, ph);
+         }
++#ifdef OPENUG2_TOUCH
++        {   int touch_menu = pause_menu_is_open(pause_menu);
++#ifdef OPENUG2_MENU
++            touch_menu = touch_menu || frontend_open;   /* start menu uses the D-pad layout too */
++#endif
++            touch_draw(&rp, &quad, ovp, W, H, touch_menu);   /* on top of everything */
++        }
++#endif
+         pf_mark(PF_POST_DRAW); pf_gpu(pf_frame,-1);
+         rhi_frame_end();
+         pf_mark(PF_SWAP);
+diff --git a/src/touch_ios.c b/src/touch_ios.c
+new file mode 100644
+index 0000000..df576e6
+--- /dev/null
++++ b/src/touch_ios.c
+@@ -0,0 +1,294 @@
++/* touch_ios.c -- see touch_ios.h */
++#include "touch_ios.h"
++
++#include <math.h>
++#include <string.h>
++
++#include "controls_bind.h"
++#include "render_params.h"
++
++/* ---- controls ---------------------------------------------------------------------------------------- */
++enum {
++    C_GAS, C_BRAKE, C_NITRO, C_HANDBRAKE, C_PAUSE, C_CAMERA, C_RESET, C_LOOK,   /* driving */
++    C_UP, C_DOWN, C_LEFT, C_RIGHT, C_OK, C_BACK,                                /* pause menu */
++    C_COUNT,
++    C_STEER = -2, C_NONE = -1
++};
++enum { K_HELD, K_ACTION_KEY, K_RAW_KEY };   /* how a control reaches the game */
++
++typedef struct {
++    const char *label;
++    int kind;
++    int action;        /* CB_ACT_* for K_HELD / K_ACTION_KEY */
++    int scancode;      /* SDL_SCANCODE_* for K_RAW_KEY */
++    int menu;          /* shown only while the pause menu is open */
++    float r, g, b;
++} CtlDef;
++
++static const CtlDef k_def[C_COUNT] = {
++    [C_GAS]       = { "GAS",   K_HELD,       CB_ACT_THROTTLE,  0, 0, 0.25f, 0.85f, 0.35f },
++    [C_BRAKE]     = { "BRK",   K_HELD,       CB_ACT_BRAKE,     0, 0, 0.90f, 0.25f, 0.25f },
++    [C_NITRO]     = { "NOS",   K_HELD,       CB_ACT_NITROUS,   0, 0, 0.30f, 0.60f, 1.00f },
++    [C_HANDBRAKE] = { "HB",    K_HELD,       CB_ACT_HANDBRAKE, 0, 0, 0.95f, 0.75f, 0.20f },
++    [C_PAUSE]     = { "PAUSE", K_ACTION_KEY, CB_ACT_PAUSE,     0, 0, 0.80f, 0.80f, 0.80f },
++    [C_CAMERA]    = { "CAM",   K_ACTION_KEY, CB_ACT_CAMERA,    0, 0, 0.80f, 0.80f, 0.80f },
++    [C_RESET]     = { "RESET", K_ACTION_KEY, CB_ACT_RESET_CAR, 0, 0, 0.80f, 0.80f, 0.80f },
++    [C_LOOK]      = { "LOOK",  K_HELD,       CB_ACT_LOOK_BACK, 0, 0, 0.80f, 0.80f, 0.80f },
++    [C_UP]        = { "UP",    K_RAW_KEY, 0, SDL_SCANCODE_UP,     1, 0.80f, 0.80f, 0.80f },
++    [C_DOWN]      = { "DN",    K_RAW_KEY, 0, SDL_SCANCODE_DOWN,   1, 0.80f, 0.80f, 0.80f },
++    [C_LEFT]      = { "L",     K_RAW_KEY, 0, SDL_SCANCODE_LEFT,   1, 0.80f, 0.80f, 0.80f },
++    [C_RIGHT]     = { "R",     K_RAW_KEY, 0, SDL_SCANCODE_RIGHT,  1, 0.80f, 0.80f, 0.80f },
++    [C_OK]        = { "OK",    K_RAW_KEY, 0, SDL_SCANCODE_RETURN, 1, 0.25f, 0.85f, 0.35f },
++    [C_BACK]      = { "BACK",  K_RAW_KEY, 0, SDL_SCANCODE_ESCAPE, 1, 0.90f, 0.25f, 0.25f },
++};
++
++/* Rectangles in normalised screen units, origin top-left (the same space as SDL touch coordinates). */
++typedef struct { float x0, y0, x1, y1; } Rect;
++
++static Rect g_rect[C_COUNT];
++static Rect g_steer_zone;
++static float g_aspect = 16.0f / 9.0f;   /* width / height of the drawable, updated by touch_draw */
++static int   g_menu;                    /* pause menu open: show the D-pad layout */
++static int   g_layout_valid;
++
++/* A square of side s (in screen-HEIGHT units, so buttons stay square at any aspect) whose right edge is rm
++   and bottom edge bm (also height units) in from the screen edges. */
++static Rect from_right_bottom(float a, float rm, float bm, float s) {
++    Rect r;
++    r.x1 = 1.0f - rm / a;  r.x0 = r.x1 - s / a;
++    r.y1 = 1.0f - bm;      r.y0 = r.y1 - s;
++    return r;
++}
++static Rect from_left_bottom(float a, float lm, float bm, float s) {
++    Rect r;
++    r.x0 = lm / a;         r.x1 = r.x0 + s / a;
++    r.y1 = 1.0f - bm;      r.y0 = r.y1 - s;
++    return r;
++}
++
++static void layout(float a) {
++    g_aspect = a;
++    /* right-hand thumb: gas biggest and in the corner, brake beside it, nitro and handbrake above */
++    g_rect[C_GAS]       = from_right_bottom(a, 0.05f, 0.06f, 0.36f);
++    g_rect[C_BRAKE]     = from_right_bottom(a, 0.45f, 0.06f, 0.28f);
++    g_rect[C_NITRO]     = from_right_bottom(a, 0.11f, 0.46f, 0.24f);
++    g_rect[C_HANDBRAKE] = from_right_bottom(a, 0.48f, 0.38f, 0.22f);
++    /* top row */
++    g_rect[C_PAUSE]     = from_right_bottom(a, 0.03f, 0.83f, 0.14f);
++    g_rect[C_CAMERA]    = from_right_bottom(a, 0.20f, 0.83f, 0.14f);
++    g_rect[C_RESET]     = from_right_bottom(a, 0.37f, 0.83f, 0.14f);
++    g_rect[C_LOOK]      = from_right_bottom(a, 0.54f, 0.83f, 0.14f);
++    /* steering strip: left part of the lower screen */
++    g_steer_zone.x0 = 0.03f; g_steer_zone.x1 = 0.40f;
++    g_steer_zone.y0 = 0.30f; g_steer_zone.y1 = 1.00f;
++    /* menu D-pad */
++    g_rect[C_UP]    = from_left_bottom(a, 0.22f, 0.48f, 0.18f);
++    g_rect[C_DOWN]  = from_left_bottom(a, 0.22f, 0.06f, 0.18f);
++    g_rect[C_LEFT]  = from_left_bottom(a, 0.04f, 0.27f, 0.18f);
++    g_rect[C_RIGHT] = from_left_bottom(a, 0.40f, 0.27f, 0.18f);
++    g_rect[C_OK]    = from_right_bottom(a, 0.05f, 0.06f, 0.28f);
++    g_rect[C_BACK]  = from_right_bottom(a, 0.37f, 0.06f, 0.20f);
++    g_layout_valid = 1;
++}
++
++static int in_rect(const Rect *r, float x, float y) { return x >= r->x0 && x <= r->x1 && y >= r->y0 && y <= r->y1; }
++
++/* ---- state ------------------------------------------------------------------------------------------- */
++#define MAX_FINGERS 10
++typedef struct { SDL_FingerID id; int active; int ctl; } Finger;
++
++static const CxInput *g_cx;
++static Finger g_finger[MAX_FINGERS];
++static int    g_held[C_COUNT];
++static int    g_pushed_sc[C_COUNT];   /* scancode whose KEYDOWN we sent for this control (so UP matches it) */
++static float  g_steer;                /* +1 left .. -1 right */
++
++void touch_init(const CxInput *cx) {
++    g_cx = cx;
++    memset(g_finger, 0, sizeof g_finger);
++    memset(g_held, 0, sizeof g_held);
++    memset(g_pushed_sc, 0, sizeof g_pushed_sc);
++    g_steer = 0.0f;
++    layout(g_aspect);
++}
++
++static void push_key(int scancode, int down) {
++    SDL_Event ev;
++    SDL_zero(ev);
++    ev.type = down ? SDL_KEYDOWN : SDL_KEYUP;
++    ev.key.state = down ? SDL_PRESSED : SDL_RELEASED;
++    ev.key.repeat = 0;
++    ev.key.keysym.scancode = (SDL_Scancode)scancode;
++    ev.key.keysym.sym = SDL_GetKeyFromScancode((SDL_Scancode)scancode);
++    SDL_PushEvent(&ev);
++}
++
++/* The key the Controls screen binds to `action` (first of its two), or 0 if none. */
++static int bound_scancode(int action) {
++    int k[2];
++    if (!g_cx) return 0;
++    return cb_kb_keys(&g_cx->b.kb, action, k) > 0 ? k[0] : 0;
++}
++
++static void press(int ctl) {
++    const CtlDef *d = &k_def[ctl];
++    g_held[ctl] = 1;
++    if (d->kind == K_HELD) return;
++    int sc = d->kind == K_RAW_KEY ? d->scancode : bound_scancode(d->action);
++    g_pushed_sc[ctl] = sc;
++    if (sc) push_key(sc, 1);
++}
++
++static void release(int ctl) {
++    if (!g_held[ctl]) return;
++    g_held[ctl] = 0;
++    if (k_def[ctl].kind != K_HELD && g_pushed_sc[ctl]) push_key(g_pushed_sc[ctl], 0);
++    g_pushed_sc[ctl] = 0;
++}
++
++static void release_all(void) {
++    for (int i = 0; i < C_COUNT; i++) release(i);
++    memset(g_finger, 0, sizeof g_finger);
++    g_steer = 0.0f;
++}
++
++static void set_steer_from_x(float x) {
++    const float centre = 0.5f * (g_steer_zone.x0 + g_steer_zone.x1);
++    const float half = 0.5f * (g_steer_zone.x1 - g_steer_zone.x0);
++    float v = (centre - x) / half;                 /* +: finger left of centre = steer left */
++    if (v > 1.0f) v = 1.0f;
++    if (v < -1.0f) v = -1.0f;
++    const float dead = 0.06f;
++    if (fabsf(v) < dead) { g_steer = 0.0f; return; }
++    float m = (fabsf(v) - dead) / (1.0f - dead);   /* 0..1 outside the dead zone */
++    g_steer = v < 0.0f ? -m : m;
++}
++
++static int hit_test(float x, float y) {
++    for (int i = 0; i < C_COUNT; i++) {
++        if ((k_def[i].menu != 0) != (g_menu != 0)) continue;
++        if (in_rect(&g_rect[i], x, y)) return i;
++    }
++    if (!g_menu && in_rect(&g_steer_zone, x, y)) return C_STEER;
++    return C_NONE;
++}
++
++static Finger *find_finger(SDL_FingerID id) {
++    for (int i = 0; i < MAX_FINGERS; i++) if (g_finger[i].active && g_finger[i].id == id) return &g_finger[i];
++    return NULL;
++}
++
++void touch_handle_event(const SDL_Event *e) {
++    switch (e->type) {
++    case SDL_FINGERDOWN: {
++        Finger *f = NULL;
++        for (int i = 0; i < MAX_FINGERS; i++) if (!g_finger[i].active) { f = &g_finger[i]; break; }
++        if (!f) return;
++        int ctl = hit_test(e->tfinger.x, e->tfinger.y);
++        if (ctl == C_NONE) return;
++        f->active = 1; f->id = e->tfinger.fingerId; f->ctl = ctl;
++        if (ctl == C_STEER) set_steer_from_x(e->tfinger.x); else press(ctl);
++        break;
++    }
++    case SDL_FINGERMOTION: {
++        Finger *f = find_finger(e->tfinger.fingerId);
++        if (f && f->ctl == C_STEER) set_steer_from_x(e->tfinger.x);
++        break;
++    }
++    case SDL_FINGERUP: {
++        Finger *f = find_finger(e->tfinger.fingerId);
++        if (!f) return;
++        if (f->ctl == C_STEER) g_steer = 0.0f; else release(f->ctl);
++        f->active = 0;
++        break;
++    }
++    case SDL_APP_WILLENTERBACKGROUND:
++    case SDL_APP_DIDENTERBACKGROUND:
++    case SDL_WINDOWEVENT:
++        if (e->type != SDL_WINDOWEVENT || e->window.event == SDL_WINDOWEVENT_FOCUS_LOST) release_all();
++        break;
++    default: break;
++    }
++}
++
++int touch_action_down(int action) {
++    if (g_menu) return 0;
++    for (int i = 0; i < C_COUNT; i++)
++        if (k_def[i].kind == K_HELD && k_def[i].action == action && g_held[i]) return 1;
++    return 0;
++}
++
++float touch_steer(void) { return g_menu ? 0.0f : g_steer; }
++
++/* ---- drawing ----------------------------------------------------------------------------------------- */
++static void draw_rect(const RProg *rp, GpuMesh *quad, const Rect *r, float cr, float cg, float cb, float alpha) {
++    /* The overlay quad is the unit square [0,1]^2: scale to the rectangle and translate to its bottom-left
++       corner, in clip space (x right, y up). */
++    float M[16] = { 2.0f * (r->x1 - r->x0), 0, 0, 0,
++                    0, 2.0f * (r->y1 - r->y0), 0, 0,
++                    0, 0, 1, 0,
++                    2.0f * r->x0 - 1.0f, 1.0f - 2.0f * r->y1, 0, 1 };
++    ug2_copy(rp->p->uMVP, M, 16);
++    ug2_vec3(rp->p->uColor, cr, cg, cb);
++    rp->p->uAlpha = alpha;
++    render_draw_gpumesh(quad);
++}
++
++static void draw_label(const RProg *rp, GpuMesh *quad, const Rect *r, const char *s, float alpha) {
++    const size_t n = strlen(s);
++    if (!n) return;
++    const float bw = 2.0f * (r->x1 - r->x0);                 /* box width in clip units */
++    float px = 0.65f * bw / (4.0f * (float)n);               /* label fills ~65% of the width */
++    const float py_cap = 0.55f * 2.0f * (r->y1 - r->y0) / 5.0f;
++    float py = px * g_aspect;                                /* square pixels: clip x and y units differ by aspect */
++    if (py > py_cap) { py = py_cap; px = py / g_aspect; }
++    const float cx = (r->x0 + r->x1) - 1.0f;                 /* box centre in clip space */
++    const float cy = 1.0f - (r->y0 + r->y1);
++    rp->p->uAlpha = alpha;
++    ug2_vec3(rp->p->uColor, 1.0f, 1.0f, 1.0f);
++    draw_text(quad, rp, s, cx - 0.5f * text_width(s, px) + 0.5f * px, cy + 1.6f * py, px, py);
++}
++
++void touch_draw(const RProg *rp, GpuMesh *quad, const UG2OverlayPipelines *ovp, int w, int h, int menu_open) {
++    if (!rp || !quad || !ovp || w <= 0 || h <= 0) return;
++    const float a = (float)w / (float)h;
++    if (!g_layout_valid || fabsf(a - g_aspect) > 0.001f) layout(a);
++    if ((menu_open != 0) != (g_menu != 0)) {   /* mode switch: nothing may stay held across it */
++        release_all();
++        g_menu = menu_open != 0;
++    }
++
++    RhiStateSnapshot saved;
++    rhi_cmd_save_state(&saved);
++    const float s_unlit = rp->p->uUnlit, s_tex = rp->p->uUseTex, s_soft = rp->p->uSoft, s_alpha = rp->p->uAlpha;
++    float s_col[3], s_mvp[16];
++    memcpy(s_col, rp->p->uColor, sizeof s_col);
++    memcpy(s_mvp, rp->p->uMVP, sizeof s_mvp);
++
++    rhi_cmd_bind_pipeline(ovp->screen_blend);
++    rp->p->uUnlit = 1.0f; rp->p->uUseTex = 0.0f; rp->p->uSoft = 0.0f;
++
++    for (int i = 0; i < C_COUNT; i++) {
++        if ((k_def[i].menu != 0) != g_menu) continue;
++        const CtlDef *d = &k_def[i];
++        draw_rect(rp, quad, &g_rect[i], d->r, d->g, d->b, g_held[i] ? 0.60f : 0.28f);
++        draw_label(rp, quad, &g_rect[i], d->label, g_held[i] ? 1.0f : 0.75f);
++    }
++    if (!g_menu) {   /* steering strip: a thin track across the zone and a knob that follows the finger */
++        const float centre = 0.5f * (g_steer_zone.x0 + g_steer_zone.x1);
++        const float half = 0.5f * (g_steer_zone.x1 - g_steer_zone.x0);
++        Rect track = { g_steer_zone.x0, 0.865f, g_steer_zone.x1, 0.885f };
++        draw_rect(rp, quad, &track, 1.0f, 1.0f, 1.0f, 0.22f);
++        Rect mid = { centre - 0.002f, 0.835f, centre + 0.002f, 0.915f };
++        draw_rect(rp, quad, &mid, 1.0f, 1.0f, 1.0f, 0.35f);
++        const float ks = 0.13f;                              /* knob side, height units */
++        const float kx = centre - g_steer * half;
++        Rect knob = { kx - 0.5f * ks / g_aspect, 0.875f - 0.5f * ks, kx + 0.5f * ks / g_aspect, 0.875f + 0.5f * ks };
++        draw_rect(rp, quad, &knob, 1.0f, 1.0f, 1.0f, g_steer != 0.0f ? 0.65f : 0.35f);
++    }
++
++    rp->p->uUnlit = s_unlit; rp->p->uUseTex = s_tex; rp->p->uSoft = s_soft; rp->p->uAlpha = s_alpha;
++    memcpy(rp->p->uColor, s_col, sizeof s_col);
++    memcpy(rp->p->uMVP, s_mvp, sizeof s_mvp);
++    rhi_cmd_restore_state(&saved);
++}
+diff --git a/src/touch_ios.h b/src/touch_ios.h
+new file mode 100644
+index 0000000..b0d042d
+--- /dev/null
++++ b/src/touch_ios.h
+@@ -0,0 +1,43 @@
++/* touch_ios.h -- on-screen touch controls for the iOS build (-DOPENUG2_TOUCH).
++ *
++ * Driving: a steering strip on the left (drag the finger left/right of the strip's centre: analog), and
++ * GAS / BRK / NOS / HB buttons on the right, plus PAUSE / CAM / RESET / LOOK along the top. While the
++ * pause menu is open the layout switches to a D-pad with OK / BACK that feeds the menu the same key events
++ * a keyboard would. Multi-touch: every finger owns the control it landed on until it lifts.
++ *
++ * Integration (everything is behind #ifdef OPENUG2_TOUCH, so desktop builds are unchanged):
++ *   touch_init(&g_cx)           after cx_init
++ *   touch_handle_event(&e)      for every SDL event
++ *   cx_action_down / cx_steer   (controls_sdl.c) ask touch_action_down / touch_steer
++ *   touch_draw(...)             last thing drawn in the frame
++ * Held actions (throttle, brake, handbrake, nitrous, look back) are read as state; pressed actions (pause,
++ * camera, reset) are pushed as SDL key events using whatever key the Controls screen has bound to them. */
++#ifndef OPENUG2_TOUCH_IOS_H
++#define OPENUG2_TOUCH_IOS_H
++
++#include <SDL.h>
++
++#include "controls_sdl.h"
++#include "render.h"
++#include "rhi.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++void  touch_init(const CxInput *cx);
++void  touch_handle_event(const SDL_Event *e);
++
++/* Held-state queries for the driving code (CB_ACT_* from controls_bind.h). Always 0 while a menu is open. */
++int   touch_action_down(int action);
++/* Steering +1 (full left) .. -1 (full right), 0 when no finger is on the strip: same sign as cx_steer. */
++float touch_steer(void);
++
++/* Draws the controls for the current mode on top of the finished frame. w/h = drawable size in pixels. */
++void  touch_draw(const RProg *rp, GpuMesh *quad, const UG2OverlayPipelines *ovp, int w, int h, int menu_open);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+-- 
+2.43.0
+

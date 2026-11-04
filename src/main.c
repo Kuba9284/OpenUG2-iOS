@@ -56,6 +56,15 @@
 #include "settings.h"
 #include "controls_sdl.h"
 #include "ugui/ugui_gl.h"
+#ifdef OPENUG2_IOS
+#include "ios_platform.h"   /* Documents-folder data path, SDL hints, background handling */
+#endif
+#ifdef OPENUG2_TOUCH
+#include "touch_ios.h"     /* on-screen touch controls */
+#endif
+#ifndef OPENUG2_EXTRA_WINDOW_FLAGS
+#define OPENUG2_EXTRA_WINDOW_FLAGS 0   /* iOS adds fullscreen (ios_platform.h) */
+#endif
 #ifdef OPENUG2_MENU
 #include "frontend/frontend.h"
 #include "frontend/frontend_draw.h"
@@ -2308,6 +2317,9 @@ int main(int argc, char **argv) {
          --no-tex-overrides  ignore --tex-overrides
          --tex-override-budget MiB  GPU memory cap for overrides (default 1536) */
     const char *dataroot = ".", *shot = NULL, *objdump = NULL, *carinfo = NULL;
+#ifdef OPENUG2_IOS
+    dataroot = ios_platform_init();   /* app Documents folder (also the working dir); an explicit DATA_DIR argument still wins */
+#endif
     int render_width = 1920, render_height = 1080;
     const char *xaudit = NULL;   /* --transform-audit REGION: GL-free placement forensics */
     float shotyaw = 1e9f;        /* --shot-yaw DEG: fixed capture heading (M132) */
@@ -3908,7 +3920,7 @@ int main(int argc, char **argv) {
     SDL_Window *win = SDL_CreateWindow("OpenUG2",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, render_width, render_height,
         window_flags |
-        (capture_window ? SDL_WINDOW_HIDDEN : SDL_WINDOW_RESIZABLE));
+        (capture_window ? SDL_WINDOW_HIDDEN : SDL_WINDOW_RESIZABLE) | OPENUG2_EXTRA_WINDOW_FLAGS);
     if (!win) { fprintf(stderr,"window: %s\n",SDL_GetError()); return 1; }
     /* The device also sets tightly packed readback rows (odd-width captures)
        and the swap interval: audits pace explicitly, so no vsync for them. */
@@ -3931,6 +3943,9 @@ int main(int argc, char **argv) {
     for (int i = 0; i < SDL_NumJoysticks() && !controller; i++)
         if (SDL_IsGameController(i)) controller = SDL_GameControllerOpen(i);
     cx_init(&g_cx);                                      /* bindings: retail defaults, then the persisted ones */
+#ifdef OPENUG2_TOUCH
+    touch_init(&g_cx);
+#endif
     if (perf_csv) pf_open(perf_csv);
     /* S3TC lets car/rim TPK textures upload their DXT blocks directly
        (glCompressedTexImage2D) instead of the CPU-decoded RGBA. */
@@ -6539,6 +6554,12 @@ int main(int argc, char **argv) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) { running = 0; continue; }
+#ifdef OPENUG2_TOUCH
+            touch_handle_event(&e);   /* first: releases held buttons on backgrounding, before the wait below */
+#endif
+#ifdef OPENUG2_IOS
+            if (ios_platform_event(&e)) continue;   /* blocks while backgrounded: no GL there */
+#endif
             uint32_t pad_edge = cx_joy_edges(&g_cx, &e);   /* every event, so hat state stays current while paused */
             int pause_allowed = 1;
 #ifdef OPENUG2_MENU
@@ -12005,6 +12026,17 @@ int main(int argc, char **argv) {
             rhi_drawable_size(&pw, &ph);
             pause_menu_draw(pause_menu, pw, ph);
         }
+#ifdef OPENUG2_TOUCH
+        {
+            int touch_menu = pause_menu_is_open(pause_menu);
+#ifdef OPENUG2_MENU
+            touch_menu = touch_menu || frontend_open;
+#endif
+            int32_t tw, th;
+            rhi_drawable_size(&tw, &th);
+            touch_draw(&rp, &quad, ovp, tw, th, touch_menu);
+        }
+#endif
         pf_mark(PF_POST_DRAW); pf_gpu(pf_frame,-1);
         rhi_frame_end();
         pf_mark(PF_SWAP);
