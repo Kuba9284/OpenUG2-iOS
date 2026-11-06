@@ -222,6 +222,24 @@ void rhi_device_destroy(void) {
     memset(&g_timers, 0, sizeof g_timers);
 }
 
+#ifdef OPENUG2_IOS
+/* iOS diagnostics: a stray GL error silently disables later uploads (see rhi_buffer_create). GLCHK() drains the error
+ * queue at a checkpoint and names where it was first seen: the log shows which backend function raised it. */
+static void ios_gl_check(const char *where, int line) {
+    static int reported;
+    GLenum e;
+    for (int i = 0; i < 16 && (e = glGetError()) != GL_NO_ERROR; i++) {
+        if (reported < 40) {
+            reported++;
+            fprintf(stderr, "rhi: GL error %s (0x%04x) raised at or before %s:%d\n", gl_error_name(e), (unsigned)e, where, line);
+        }
+    }
+}
+#define GLCHK() ios_gl_check(__func__, __LINE__)
+#else
+#define GLCHK() ((void)0)
+#endif
+
 void rhi_drawable_size(int32_t *width, int32_t *height) {
     int w = 0, h = 0;
     if (g_rhi.window) SDL_GL_GetDrawableSize(g_rhi.window, &w, &h);
@@ -242,6 +260,7 @@ RhiResult rhi_frame_begin(RhiFrameInfo *out) {
         out->height = g_rhi.frame_h;
         out->frame_index = g_rhi.frame_index;
     }
+    GLCHK();
     return RHI_OK;
 }
 
@@ -376,6 +395,14 @@ RhiBuffer rhi_buffer_create(const RhiBufferDesc *desc) {
         /* STATIC uploads are checked: an error already pending counts as a failure,
            but is named separately from the one glBufferData raised. */
         GLenum stale = desc->update == RHI_UPDATE_STATIC ? gl_take_error() : GL_NO_ERROR;
+#ifdef OPENUG2_IOS
+        if (stale) {   /* an unrelated earlier error must not cost the geometry its upload on iOS; say so and go on */
+            static int told;
+            if (told++ < 10) fprintf(stderr, "rhi: buffer_create: %s (0x%04x) was pending before the call; uploading anyway\n",
+                                     gl_error_name(stale), (unsigned)stale);
+            stale = GL_NO_ERROR;
+        }
+#endif
         glBindBuffer(b->target, name);
         glBufferData(b->target, (GLsizeiptr)desc->size, desc->data, b->hint);
         b->size = desc->size;
@@ -399,6 +426,7 @@ RhiResult rhi_buffer_update(RhiBuffer buf, size_t offset, size_t size, const voi
     if (!b || !data || offset > b->size || size > b->size - offset) return RHI_ERR_INVALID;
     glBindBuffer(b->target, b->name);
     glBufferSubData(b->target, (GLintptr)offset, (GLsizeiptr)size, data);
+    GLCHK();
     return b->hint == GL_STATIC_DRAW ? gl_result() : RHI_OK;
 }
 
@@ -408,6 +436,7 @@ RhiResult rhi_buffer_replace(RhiBuffer buf, size_t size, const void *data) {
     glBindBuffer(b->target, b->name);
     glBufferData(b->target, (GLsizeiptr)size, data, b->hint);
     b->size = size;
+    GLCHK();
     return b->hint == GL_STATIC_DRAW ? gl_result() : RHI_OK;
 }
 
@@ -582,6 +611,7 @@ RhiTexture rhi_texture_create(const RhiTextureDesc *desc) {
         return out;
     }
     work_unit_done(work_unit_bind(t->target, name));
+    GLCHK();
     return out;
 }
 
@@ -618,6 +648,7 @@ RhiResult rhi_texture_generate_mips(RhiTexture tex) {
     GLint active = work_unit_bind(GL_TEXTURE_2D, t->name);
     glGenerateMipmap(GL_TEXTURE_2D);
     work_unit_done(active);
+    GLCHK();
     return gl_result();
 }
 
@@ -726,6 +757,7 @@ RhiResult rhi_texture_set_sampler(RhiTexture tex, RhiSampler sampler) {
     t->anisotropy = aniso;
     t->sampler = sampler;
     work_unit_done(active);
+    GLCHK();
     return RHI_OK;
 }
 
@@ -946,6 +978,7 @@ void rhi_gl_flush_params(void) {
             memcpy(pb->uploaded + off, pb->data + off, n);
         }
     }
+    GLCHK();
 }
 
 void rhi_shader_destroy(RhiShader shader) {
@@ -1151,12 +1184,14 @@ void rhi_cmd_bind_pipeline(RhiPipeline pipeline) {
         glStencilOp(gl_stencil_op(d->stencil_fail), gl_stencil_op(d->stencil_depth_fail),
                     gl_stencil_op(d->stencil_pass));
     }
+    GLCHK();
 }
 
 void rhi_cmd_bind_vertex_buffer(uint32_t stream, RhiBuffer buffer, uint32_t offset) {
     if (stream >= RHI_MAX_VERTEX_STREAMS) return;
     g_cmd.vertex[stream] = buffer;
     g_cmd.vertex_offset[stream] = offset;
+    GLCHK();
 }
 
 void rhi_cmd_bind_index_buffer(RhiBuffer buffer) { g_cmd.index = buffer; }
@@ -1172,6 +1207,7 @@ void rhi_cmd_bind_texture(uint32_t slot, RhiTexture texture) {
     gls_get_integerv(GL_ACTIVE_TEXTURE, &active);
     if ((GLenum)active != GL_TEXTURE0 + slot) glActiveTexture(GL_TEXTURE0 + slot);
     glBindTexture(t ? t->target : GL_TEXTURE_2D, t ? t->name : 0);
+    GLCHK();
 }
 
 /* Vertex setup for a draw: per layout attribute (in layout order) its buffer,
@@ -1227,6 +1263,7 @@ static const RhiPipelineDesc *draw_setup(const char *what, uint32_t vertex_count
     }
     for (GLuint loc = 0; loc < RHI_MAX_VERTEX_ATTRIBS; loc++)
         if (!(used & (1u << loc)) && gls_attrib_enabled(loc)) glDisableVertexAttribArray(loc);
+    GLCHK();
     return d;
 }
 
@@ -1245,8 +1282,10 @@ void rhi_cmd_draw_indexed(uint32_t index_count, uint32_t first_index) {
     if (!d) return;
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index->name);
     rhi_gl_flush_params();
+    GLCHK();   /* setup vs draw: tell them apart */
     glDrawElements(gl_primitive(d->primitive), (GLsizei)index_count, GL_UNSIGNED_SHORT,
                    (const void *)((uintptr_t)first_index * 2u));
+    GLCHK();
 }
 
 void rhi_cmd_draw(uint32_t vertex_count, uint32_t first_vertex) {
@@ -1258,7 +1297,9 @@ void rhi_cmd_draw(uint32_t vertex_count, uint32_t first_vertex) {
     const RhiPipelineDesc *d = draw_setup("draw", vertex_count, first_vertex);
     if (!d) return;
     rhi_gl_flush_params();
+    GLCHK();
     glDrawArrays(gl_primitive(d->primitive), (GLint)first_vertex, (GLsizei)vertex_count);
+    GLCHK();
 }
 
 /* ------------------------------------------------------------------------------ */
@@ -1374,6 +1415,7 @@ RhiResult rhi_cmd_begin_pass(const RhiPassDesc *desc) {
                  (desc->depth_load == RHI_LOAD_CLEAR && depth ? GL_DEPTH_BUFFER_BIT : 0),
                  desc->clear_color, desc->clear_depth);
     g_in_pass = 1;
+    GLCHK();
     return RHI_OK;
 }
 
@@ -1429,6 +1471,7 @@ void rhi_cmd_save_state(RhiStateSnapshot *out) {
     gls_get_booleanv(GL_COLOR_WRITEMASK, g.color_mask);
     memset(out, 0, sizeof *out);
     memcpy(out, &g, sizeof g);
+    GLCHK();
 }
 
 void rhi_state_set_texture(RhiStateSnapshot *state, uint32_t slot, RhiTexture texture) {
@@ -1495,6 +1538,7 @@ void rhi_cmd_restore_state(const RhiStateSnapshot *state) {
         glBindTexture(GL_TEXTURE_2D, (GLuint)g.texture[i]);
     }
     if (active != g.active) glActiveTexture((GLenum)g.active);
+    GLCHK();
 }
 
 void rhi_viewport(int32_t viewport[4]) {
@@ -1517,6 +1561,7 @@ RhiResult rhi_cmd_clear_main(const float color[4], float depth) {
     glViewport(0, 0, g_rhi.frame_w, g_rhi.frame_h);
     set_cap(GL_SCISSOR_TEST, 0);
     clear_target(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, color, depth);
+    GLCHK();
     return RHI_OK;
 }
 
