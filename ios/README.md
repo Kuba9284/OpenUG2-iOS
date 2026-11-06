@@ -37,6 +37,10 @@ are written there too).
 - Finder (macOS): select the iPhone, **Files** tab, drag your NFSU2 folders onto **OpenUG2**
 - or the **Files** app: *On My iPhone > OpenUG2*
 
+If the game files are missing, the app shows a dialog with the exact folder it is looking in (it also writes
+`openug2.log` there). Under **LiveContainer** that folder is nested, e.g.
+`LiveContainer/Documents/Data/Application/<guest GUID>/Documents`; use the path the dialog shows.
+
 The default car and track are the engine's defaults (`CARS/HUMMER`, `TRACKS/STREAML4RA`), so those must be
 present. The start menu offers **Free Roam** and **Race Select**.
 

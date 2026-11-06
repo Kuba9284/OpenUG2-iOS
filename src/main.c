@@ -2319,6 +2319,7 @@ int main(int argc, char **argv) {
     const char *dataroot = ".", *shot = NULL, *objdump = NULL, *carinfo = NULL;
 #ifdef OPENUG2_IOS
     dataroot = ios_platform_init();   /* app Documents folder (also the working dir); an explicit DATA_DIR argument still wins */
+    if (!ios_platform_check_data(dataroot)) return 1;   /* no files yet: say where to put them, instead of a blank screen */
 #endif
     int render_width = 1920, render_height = 1080;
     const char *xaudit = NULL;   /* --transform-audit REGION: GL-free placement forensics */
@@ -3595,6 +3596,11 @@ int main(int argc, char **argv) {
                     companion_read?"read OK":"READ FAILED",companion_len);
             fprintf(stderr,"  stream: %s (%s, %ld bytes)\n",stream_path,
                     stream_read?"read OK":"READ FAILED",stream_len);
+#ifdef OPENUG2_IOS
+            { char m[1800]; snprintf(m, sizeof m, "Could not read the track files for %s:\n\n%s: %s\n%s: %s\n\nThey belong in the TRACKS folder inside:\n%s",
+                       trackname, companion_path, companion_read ? "ok" : "missing", stream_path, stream_read ? "ok" : "missing", dataroot);
+              ios_platform_fatal("Track data missing", m); }
+#endif
             return 1;
         }
         printf("open world: %s authored focus (%.3f, %.3f)\n",trackname,

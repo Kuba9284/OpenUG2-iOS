@@ -23,6 +23,10 @@ const char *ios_platform_init(void);
  * a black screen or a silent exit. Safe to call before or after SDL_Init. */
 void ios_platform_fatal(const char *title, const char *message);
 
+/* Returns 1 if the NFSU2 data folders (TRACKS, CARS) are present under root. Otherwise shows a dialog that names the
+ * exact folder to copy them into, and returns 0: the caller should exit. Call first thing, before any loading. */
+int ios_platform_check_data(const char *root);
+
 /* Feed every SDL event through this. On SDL_APP_WILLENTERBACKGROUND it blocks until the app is foreground
  * again (or quits), so the render loop makes no GL call while backgrounded. Returns 1 if it blocked. */
 int ios_platform_event(const SDL_Event *e);

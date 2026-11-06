@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <sys/stat.h>
 
 #include "ios_platform.h"
 
@@ -37,7 +38,29 @@ const char *ios_platform_init(void) {
 void ios_platform_fatal(const char *title, const char *message) {
     fprintf(stderr, "FATAL: %s: %s\n", title, message);
     fflush(stderr);
+    /* The alert is presented through SDL's UIKit video driver: make sure it is up (SDL_Init later is reference counted). */
+    if (!SDL_WasInit(SDL_INIT_VIDEO)) SDL_InitSubSystem(SDL_INIT_VIDEO);
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title, message, NULL);
+}
+
+static int is_dir(const char *root, const char *name) {
+    char p[1100];
+    struct stat st;
+    snprintf(p, sizeof p, "%s/%s", root, name);
+    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+int ios_platform_check_data(const char *root) {
+    const int tracks = is_dir(root, "TRACKS"), cars = is_dir(root, "CARS");
+    fprintf(stderr, "data check: %s  TRACKS=%s CARS=%s\n", root, tracks ? "ok" : "MISSING", cars ? "ok" : "MISSING");
+    if (tracks && cars) return 1;
+    char m[1600];
+    snprintf(m, sizeof m,
+             "The NFSU2 game files were not found, missing: %s%s%s.\n\n"
+             "Copy the TRACKS and CARS folders (and the rest of the game's data folders, such as GLOBAL) from your own NFSU2 install into this folder, then reopen:\n\n%s",
+             tracks ? "" : "TRACKS", (!tracks && !cars) ? " and " : "", cars ? "" : "CARS", root);
+    ios_platform_fatal("NFSU2 data not found", m);
+    return 0;
 }
 
 int ios_platform_event(const SDL_Event *e) {
