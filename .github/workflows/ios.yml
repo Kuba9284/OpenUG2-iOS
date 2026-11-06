@@ -1,0 +1,39 @@
+name: iOS build
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-26          # macos-latest is the same image now
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: brew install xcodegen cmake
+
+      - name: Cache SDL2 + libpng
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/deps/src
+            ios/deps/out
+          key: ios-deps-${{ runner.arch }}-${{ hashFiles('ios/build_deps.sh') }}
+
+      - name: Build SDL2 + libpng for iOS
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: ios/build_deps.sh
+
+      - name: Generate Xcode project
+        run: cd ios && xcodegen generate
+
+      - name: Build unsigned IPA
+        run: ios/make_ipa.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenUG2-unsigned-ipa
+          path: ios/build/OpenUG2-unsigned.ipa
