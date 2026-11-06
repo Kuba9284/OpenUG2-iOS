@@ -65,6 +65,10 @@ static void gls_reset(SDL_GLContext ctx) {
     for (int i = 0; i < GLS_ATTRIBS; i++) S.aptr[i] = (GlsAttribPointer){ 4, (GLint)GL_FLOAT, 0, 0, 0, NULL };
     SDL_Window *w = SDL_GL_GetCurrentWindow();
     if (w) SDL_GL_GetDrawableSize(w, &S.viewport[2], &S.viewport[3]);
+#ifdef OPENUG2_IOS
+    /* The screen is not framebuffer 0 on iOS: begin from what SDL left bound so a state restore never binds 0. */
+    { GLint fb = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb); S.framebuffer = fb; }
+#endif
 }
 
 static GlsState *st(void) {

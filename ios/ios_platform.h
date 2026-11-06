@@ -19,6 +19,10 @@ extern "C" {
  * directory (valid for the life of the process; never NULL -- "." if the lookup failed). */
 const char *ios_platform_init(void);
 
+/* Shows a blocking error dialog (and logs it). A phone has no console, so a failed start would otherwise look like
+ * a black screen or a silent exit. Safe to call before or after SDL_Init. */
+void ios_platform_fatal(const char *title, const char *message);
+
 /* Feed every SDL event through this. On SDL_APP_WILLENTERBACKGROUND it blocks until the app is foreground
  * again (or quits), so the render loop makes no GL call while backgrounded. Returns 1 if it blocked. */
 int ios_platform_event(const SDL_Event *e);

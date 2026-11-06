@@ -5,6 +5,9 @@
 #include "rhi.h"
 #include "rhi_gl.h"
 #include "rhi_gl_state.h"   /* GL headers; SDL_GL_*Context go through the tracker */
+#ifdef OPENUG2_IOS
+#include <SDL_syswm.h>   /* uikit.framebuffer: the GL view's framebuffer object */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,6 +65,21 @@ static struct {
     int32_t       frame_w, frame_h;   /* main target size of the open frame */
     int           in_frame;
 } g_rhi;
+
+#ifdef OPENUG2_IOS
+/* On iOS the window's GL view renders into its own framebuffer object, not framebuffer 0: binding 0 and drawing
+   goes nowhere (a black screen). SDL documents uikit.framebuffer as "must be bound when rendering to the screen".
+   It is looked up per use because the view can be recreated (rotation, backgrounding). */
+static GLuint screen_fbo(void) {
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (g_rhi.window && SDL_GetWindowWMInfo(g_rhi.window, &info) && info.subsystem == SDL_SYSWM_UIKIT)
+        return info.info.uikit.framebuffer;
+    return 0;
+}
+#else
+static inline GLuint screen_fbo(void) { return 0; }   /* desktop: the default framebuffer */
+#endif
 
 static RhiBackend resolve(RhiBackend backend) {
     return backend == RHI_BACKEND_DEFAULT ? RHI_GL_BUILD_BACKEND : backend;
@@ -187,6 +205,12 @@ RhiResult rhi_device_create(const RhiDeviceDesc *desc) {
     /* Readbacks are tightly packed rows, including odd widths. */
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     query_caps(&g_rhi.caps);
+#ifdef OPENUG2_IOS
+    fprintf(stderr, "GL: vendor '%s' renderer '%s' version '%s'; screen fbo %u\n",
+            (const char *)glGetString(GL_VENDOR), (const char *)glGetString(GL_RENDERER),
+            (const char *)glGetString(GL_VERSION), (unsigned)screen_fbo());
+    fflush(stderr);
+#endif
     SDL_GL_SetSwapInterval((desc->flags & RHI_DEVICE_VSYNC) ? 1 : 0);
     return RHI_OK;
 }
@@ -1481,7 +1505,15 @@ void rhi_viewport(int32_t viewport[4]) {
 
 RhiResult rhi_cmd_clear_main(const float color[4], float depth) {
     if (!color || !g_rhi.in_frame || g_in_pass) return RHI_ERR_INVALID;
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    const GLuint screen = screen_fbo();
+    glBindFramebuffer(GL_FRAMEBUFFER, screen);
+#ifdef OPENUG2_IOS
+    { static int logged;   /* once: is the screen framebuffer actually complete? */
+      if (!logged) { logged = 1;
+          fprintf(stderr, "rhi: main target fbo %u status 0x%x, frame %dx%d\n", (unsigned)screen,
+                  (unsigned)glCheckFramebufferStatus(GL_FRAMEBUFFER), (int)g_rhi.frame_w, (int)g_rhi.frame_h);
+          fflush(stderr); } }
+#endif
     glViewport(0, 0, g_rhi.frame_w, g_rhi.frame_h);
     set_cap(GL_SCISSOR_TEST, 0);
     clear_target(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, color, depth);
@@ -1509,7 +1541,8 @@ RhiResult rhi_cmd_copy_main_to_texture(RhiTexture texture, int32_t x, int32_t y,
     if (w > frame_w - x || h > frame_h - y) return RHI_ERR_INVALID;
     GLint framebuffer;
     gls_get_integerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
-    if (framebuffer) glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    const GLuint screen = screen_fbo();
+    if ((GLuint)framebuffer != screen) glBindFramebuffer(GL_FRAMEBUFFER, screen);   /* read from the main target */
     GLint active = work_unit_bind(GL_TEXTURE_2D, t->name);
     if (t->copied_w != w || t->copied_h != h) {
         glCopyTexImage2D(GL_TEXTURE_2D, 0, t->format == RHI_FORMAT_DEPTH ? GL_DEPTH_COMPONENT : GL_RGBA,
@@ -1519,7 +1552,7 @@ RhiResult rhi_cmd_copy_main_to_texture(RhiTexture texture, int32_t x, int32_t y,
     } else glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, x, y, w, h);
     RhiResult result = glGetError() == GL_NO_ERROR ? RHI_OK : RHI_ERR_UNSUPPORTED;
     work_unit_done(active);
-    if (framebuffer) glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)framebuffer);
+    if ((GLuint)framebuffer != screen) glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)framebuffer);
     if (result != RHI_OK) return result;
     t->copied_w = w; t->copied_h = h;
     t->width = w; t->height = h;

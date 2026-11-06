@@ -3743,7 +3743,12 @@ int main(int argc, char **argv) {
                objdump, tv, tf, s->count);
         return 0;
     }
-    if (!nm) { fprintf(stderr, "no track data\n  (pass your NFSU2 data dir: nfsu2 /path/to/data)\n"); return 1; }
+    if (!nm) { fprintf(stderr, "no track data\n  (pass your NFSU2 data dir: nfsu2 /path/to/data)\n");
+#ifdef OPENUG2_IOS
+        { char m[1400]; snprintf(m, sizeof m, "No NFSU2 track data found in:\n%s\n\nCopy your NFSU2 folders (TRACKS, CARS, GLOBAL, ...) into this app's Documents folder, then reopen.", dataroot);
+          ios_platform_fatal("NFSU2 data not found", m); }
+#endif
+        return 1; }
     N2Scene scene = world.neighborhood.scene;   /* shares world.neighborhood.scene.meshes */
     g_stage5_world.scene=&scene;
     g_stage5_world.collision=&world.neighborhood.track_collision;
@@ -3921,12 +3926,20 @@ int main(int argc, char **argv) {
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, render_width, render_height,
         window_flags |
         (capture_window ? SDL_WINDOW_HIDDEN : SDL_WINDOW_RESIZABLE) | OPENUG2_EXTRA_WINDOW_FLAGS);
-    if (!win) { fprintf(stderr,"window: %s\n",SDL_GetError()); return 1; }
+    if (!win) { fprintf(stderr,"window: %s\n",SDL_GetError());
+#ifdef OPENUG2_IOS
+        ios_platform_fatal("Window creation failed", SDL_GetError());
+#endif
+        return 1; }
     /* The device also sets tightly packed readback rows (odd-width captures)
        and the swap interval: audits pace explicitly, so no vsync for them. */
     { RhiDeviceDesc dev = { RHI_BACKEND_DEFAULT,
                             (shot || ai_drive_audit) ? 0u : (uint32_t)RHI_DEVICE_VSYNC, win };
-      if (rhi_device_create(&dev) != RHI_OK) return 1; }
+      if (rhi_device_create(&dev) != RHI_OK) {
+#ifdef OPENUG2_IOS
+          ios_platform_fatal("OpenGL ES context failed", SDL_GetError());
+#endif
+          return 1; } }
     const RhiCaps *caps = rhi_caps();
     { int32_t dw,dh; const int32_t *limit = caps->max_viewport;
       rhi_drawable_size(&dw,&dh);

@@ -24,7 +24,20 @@ const char *ios_platform_init(void) {
 
     /* Settings, controls and any file the engine writes with a relative path land in Documents too. */
     if (chdir(g_docs) != 0) perror("openug2: chdir(Documents)");
+
+    /* There is no console on a phone: everything the engine prints goes to Documents/openug2.log (one run per file),
+       readable from the Files app. Both streams append to the same file so neither overwrites the other. */
+    unlink("openug2.log");
+    if (freopen("openug2.log", "a", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
+    if (freopen("openug2.log", "a", stdout)) setvbuf(stdout, NULL, _IOLBF, 0);
+    fprintf(stderr, "OpenUG2 iOS: Documents = %s\n", g_docs);
     return g_docs;
+}
+
+void ios_platform_fatal(const char *title, const char *message) {
+    fprintf(stderr, "FATAL: %s: %s\n", title, message);
+    fflush(stderr);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title, message, NULL);
 }
 
 int ios_platform_event(const SDL_Event *e) {
