@@ -98,7 +98,7 @@ static GltSite glt_site[GLT_SLOTS];
 static struct {
     unsigned long long errors_total, frame_calls, draws, tris, acc_calls, acc_draws, acc_tris;
     unsigned tex_created, buf_created;
-    unsigned long long tex_bytes, buf_bytes;
+    unsigned long long tex_bytes, buf_bytes, swap_ticks, swaps;
 } glt;
 
 static const char *glt_err_name(GLenum e) {
@@ -364,6 +364,12 @@ static void glt_probe(void) {
             100.0 * (double)quad_nb[0] / (double)qn, 100.0 * (double)quad_nb[1] / (double)qn, 100.0 * (double)quad_nb[2] / (double)qn, 100.0 * (double)quad_nb[3] / (double)qn,
             sum[0] / total, sum[1] / total, sum[2] / total, sum[3] / total, c[0], c[1], c[2], c[3], distinct,
             nonblack == 0 ? "ALL BLACK: nothing reached the screen buffer" : distinct < 4 ? "flat: one or two colours only" : "has picture content");
+    const unsigned long long pf = g_rhi.frame_index;
+    if (pf == 30 || pf == 600) {   /* the picture as GL has it, to compare with what UIKit shows (openug2-uikit-snapshot.png) */
+        char nm[64];
+        snprintf(nm, sizeof nm, "openug2-framebuffer-%llu.png", pf);
+        ios_debug_save_png(nm, px, w, h, 1);
+    }
     free(px);
 }
 
@@ -392,11 +398,50 @@ static void glt_frame_begin(void) {
     glt_boundary("frame begin");
 }
 
+/* A visible test that does not depend on the engine: for ~1.8 s, starting 1.5 s after the first frame, the whole screen
+ * buffer is overwritten just before the swap with magenta, then green, then blue. If you see these colours the
+ * presentation path works and the problem is in what the engine draws; if the screen stays black, GL content
+ * never reaches the display. Real GL state is saved and restored around it (the tracker is bypassed with (glX)()). */
+static void glt_display_test(void) {
+    static Uint32 t0;
+    static int announced;
+    const Uint32 now = SDL_GetTicks();
+    if (!t0) t0 = now;
+    const Uint32 t = now - t0;
+    float c[3];
+    if (t >= 1500 && t < 2100) { c[0] = 1; c[1] = 0; c[2] = 1; }
+    else if (t >= 2100 && t < 2700) { c[0] = 0; c[1] = 1; c[2] = 0; }
+    else if (t >= 2700 && t < 3300) { c[0] = 0; c[1] = 0; c[2] = 1; }
+    else return;
+    if (!announced) {
+        announced = 1;
+        fprintf(stderr, "DISPLAYTEST: the screen is flashing magenta, green, blue (about 2 seconds) -- note which colours you actually see\n");
+    }
+    GLint fbo = 0;
+    GLfloat cc[4] = {0, 0, 0, 0};
+    GLboolean cm[4] = {1, 1, 1, 1};
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, cc);
+    glGetBooleanv(GL_COLOR_WRITEMASK, cm);
+    const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    (glBindFramebuffer)(GL_FRAMEBUFFER, screen_fbo());
+    (glColorMask)(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    (glDisable)(GL_SCISSOR_TEST);
+    (glClearColor)(c[0], c[1], c[2], 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    (glClearColor)(cc[0], cc[1], cc[2], cc[3]);
+    (glColorMask)(cm[0], cm[1], cm[2], cm[3]);
+    if (scissor) (glEnable)(GL_SCISSOR_TEST);
+    (glBindFramebuffer)(GL_FRAMEBUFFER, (GLuint)fbo);
+    glt_drain();
+}
+
 static void glt_preswap(void) {
     if (!ios_super_debug()) return;
     glt_boundary("pre-swap");
     const unsigned long long f = g_rhi.frame_index;
     if (f <= 3 || f == 5 || f == 10 || f == 30 || f == 100 || f % 600 == 0) glt_probe();
+    glt_display_test();
 }
 
 static void glt_postswap(void) {
@@ -407,6 +452,7 @@ static void glt_postswap(void) {
     const unsigned long long f = g_rhi.frame_index;
     if (f == 1 || f == 299) glt_mark_all();
     if (f == 2 || f == 300) glt_census();
+    if (f == 30 || f == 300) ios_debug_dump_windows(f == 30 ? "frame 30" : "frame 300", f == 300);
     glt.acc_calls += glt.frame_calls; glt.acc_draws += glt.draws; glt.acc_tris += glt.tris;
     glt.frame_calls = glt.draws = glt.tris = 0;
     const Uint32 now = SDL_GetTicks();
@@ -415,17 +461,21 @@ static void glt_postswap(void) {
         const unsigned long long frames = f + 1 - last_frame;
         unsigned long long sites = 0, site_errors = 0;
         for (unsigned i = 0; i < GLT_SLOTS; i++) if (glt_site[i].fn) { sites++; site_errors += glt_site[i].errors ? 1 : 0; }
-        fprintf(stderr, "STATS frame %llu: %.1f fps, per frame %llu GL calls %llu draws %llu triangles; GL errors so far %llu (%llu call sites); textures %u (~%llu MB), buffers %u (%llu MB); resident %ld MB, available %ld MB\n",
+        fprintf(stderr, "STATS frame %llu: %.1f fps, per frame %llu GL calls %llu draws %llu triangles; swap %.2f ms avg; GL errors so far %llu (%llu call sites); textures %u (~%llu MB), buffers %u (%llu MB); resident %ld MB, available %ld MB\n",
                 (unsigned long long)f, 1000.0 * (double)frames / (double)(now - last_ms), glt.acc_calls / frames, glt.acc_draws / frames, glt.acc_tris / frames,
+                glt.swaps ? 1000.0 * ((double)glt.swap_ticks / (double)SDL_GetPerformanceFrequency()) / (double)glt.swaps : 0.0,
                 glt.errors_total, site_errors, glt.tex_created, glt.tex_bytes >> 20, glt.buf_created, glt.buf_bytes >> 20,
                 ios_debug_resident_mb(), ios_debug_avail_mb());
         (void)sites;
         glt.acc_calls = glt.acc_draws = glt.acc_tris = 0;
+        glt.swap_ticks = glt.swaps = 0;
         last_ms = now;
         last_frame = f + 1;
     }
 }
 
+#define GLT_SWAP_BEGIN() const Uint64 glt_sw0 = SDL_GetPerformanceCounter()
+#define GLT_SWAP_END() do { glt.swap_ticks += SDL_GetPerformanceCounter() - glt_sw0; glt.swaps++; } while (0)
 #define GLT_FRAME_BEGIN() glt_frame_begin()
 #define GLT_PRESWAP() glt_preswap()
 #define GLT_POSTSWAP() glt_postswap()
@@ -434,6 +484,8 @@ static void glt_postswap(void) {
 #include "rhi_gl_trace.h"   /* from here on every GL call in this file is checked (Super Debug Mode) */
 #else
 #define GLT_STAT(x) ((void)0)
+#define GLT_SWAP_BEGIN() ((void)0)
+#define GLT_SWAP_END() ((void)0)
 #define GLT_FRAME_BEGIN() ((void)0)
 #define GLT_PRESWAP() ((void)0)
 #define GLT_POSTSWAP() ((void)0)
@@ -646,7 +698,9 @@ RhiResult rhi_frame_end(void) {
     if (!g_rhi.context) return RHI_ERR_INVALID;
     GLT_PRESWAP();
     GLCHK();   /* anything raised during the frame, before the swap */
+    GLT_SWAP_BEGIN();
     SDL_GL_SwapWindow(g_rhi.window);
+    GLT_SWAP_END();
     GLCHK();   /* raised by the swap itself */
     GLT_POSTSWAP();
 #ifdef OPENUG2_IOS

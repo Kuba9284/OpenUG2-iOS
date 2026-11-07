@@ -275,3 +275,91 @@ void ios_platform_begin_log(void) {
         start_heartbeat();
     }
 }
+
+/* ---- what UIKit actually has on screen (Super Debug) ---- */
+static void dump_view(UIView *v, int depth) {
+    char pad[40];
+    int n = depth * 2 < 38 ? depth * 2 : 38;
+    memset(pad, ' ', (size_t)n);
+    pad[n] = 0;
+    fprintf(stderr, "UIKIT   %s%s frame (%.0f,%.0f %.0fx%.0f) hidden %d alpha %.2f opaque %d | layer %s opaque %d scale %.1f contents %s | bg %s\n", pad,
+            NSStringFromClass(v.class).UTF8String, v.frame.origin.x, v.frame.origin.y, v.frame.size.width, v.frame.size.height, (int)v.hidden,
+            (double)v.alpha, (int)v.opaque, NSStringFromClass(v.layer.class).UTF8String, (int)v.layer.opaque, (double)v.layer.contentsScale,
+            v.layer.contents ? "yes" : "none", v.backgroundColor ? [[v.backgroundColor description] UTF8String] : "none");
+    if (depth >= 4) return;
+    NSUInteger i = 0;
+    for (UIView *s in v.subviews) { if (i++ >= 8) break; dump_view(s, depth + 1); }
+}
+
+void ios_debug_save_png(const char *name, const unsigned char *rgba, int w, int h, int flip_y) {
+    if (!rgba || w <= 0 || h <= 0) return;
+    @autoreleasepool {
+        size_t row = (size_t)w * 4;
+        unsigned char *copy = (unsigned char *)malloc(row * (size_t)h);
+        if (!copy) return;
+        for (int y = 0; y < h; y++) {
+            memcpy(copy + row * (size_t)y, rgba + row * (size_t)(flip_y ? h - 1 - y : y), row);
+            for (int x = 0; x < w; x++) copy[row * (size_t)y + (size_t)x * 4 + 3] = 255;
+        }
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef cg = CGBitmapContextCreate(copy, (size_t)w, (size_t)h, 8, row, cs, (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
+        CGImageRef img = cg ? CGBitmapContextCreateImage(cg) : NULL;
+        if (img) {
+            UIImage *ui = [UIImage imageWithCGImage:img];
+            NSData *png = UIImagePNGRepresentation(ui);
+            NSString *path = [[NSString stringWithUTF8String:g_docs] stringByAppendingPathComponent:[NSString stringWithUTF8String:name]];
+            fprintf(stderr, "SNAPSHOT saved %s (%dx%d): %s\n", name, w, h, [png writeToFile:path atomically:YES] ? "ok" : "FAILED");
+            CGImageRelease(img);
+        }
+        if (cg) CGContextRelease(cg);
+        CGColorSpaceRelease(cs);
+        free(copy);
+    }
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+void ios_debug_dump_windows(const char *tag, int snapshot) {
+    @autoreleasepool {
+        UIApplication *app = UIApplication.sharedApplication;
+        fprintf(stderr, "UIKIT [%s] app state %ld (0 active, 1 inactive, 2 background), connected scenes %lu, windows %lu\n", tag,
+                (long)app.applicationState, (unsigned long)app.connectedScenes.count, (unsigned long)app.windows.count);
+        for (UIScene *sc in app.connectedScenes)
+            fprintf(stderr, "UIKIT   scene %s state %ld\n", NSStringFromClass(sc.class).UTF8String, (long)sc.activationState);
+        UIWindow *sdlw = nil;
+        for (UIWindow *w in app.windows) {
+            fprintf(stderr, "UIKIT window %s frame (%.0f,%.0f %.0fx%.0f) hidden %d alpha %.2f level %.0f key %d scene %s root %s\n",
+                    NSStringFromClass(w.class).UTF8String, w.frame.origin.x, w.frame.origin.y, w.frame.size.width, w.frame.size.height, (int)w.hidden,
+                    (double)w.alpha, (double)w.windowLevel, (int)w.isKeyWindow, w.windowScene ? "yes" : "none",
+                    w.rootViewController ? NSStringFromClass(w.rootViewController.class).UTF8String : "none");
+            dump_view(w, 1);
+            if (!sdlw && !w.hidden && [NSStringFromClass(w.class) rangeOfString:@"SDL"].location != NSNotFound) sdlw = w;
+        }
+        if (!snapshot) return;
+        if (!sdlw) { fprintf(stderr, "UIKIT snapshot: no visible SDL window to capture\n"); return; }
+        UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
+        fmt.scale = 1;
+        fmt.opaque = YES;
+        UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:sdlw.bounds.size format:fmt];
+        UIImage *img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+            [sdlw drawViewHierarchyInRect:sdlw.bounds afterScreenUpdates:NO];
+        }];
+        CGImageRef cg = img.CGImage;
+        if (!cg) { fprintf(stderr, "UIKIT snapshot: no image\n"); return; }
+        const size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
+        unsigned char *px = (unsigned char *)calloc(w * h, 4);
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef bc = CGBitmapContextCreate(px, w, h, 8, w * 4, cs, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+        CGContextDrawImage(bc, CGRectMake(0, 0, (CGFloat)w, (CGFloat)h), cg);
+        size_t nonblack = 0;
+        for (size_t i = 0; i < w * h; i++) if (px[i * 4] > 8 || px[i * 4 + 1] > 8 || px[i * 4 + 2] > 8) nonblack++;
+        fprintf(stderr, "UIKIT snapshot of the composed SDL window %zux%zu: non-black %.1f%% -> %s\n", w, h, 100.0 * (double)nonblack / (double)(w * h),
+                nonblack == 0 ? "BLACK: UIKit is not showing the GL content" : "UIKit shows content");
+        CGContextRelease(bc);
+        CGColorSpaceRelease(cs);
+        free(px);
+        NSString *path = [[NSString stringWithUTF8String:g_docs] stringByAppendingPathComponent:@"openug2-uikit-snapshot.png"];
+        fprintf(stderr, "SNAPSHOT saved openug2-uikit-snapshot.png: %s\n", [UIImagePNGRepresentation(img) writeToFile:path atomically:YES] ? "ok" : "FAILED");
+    }
+}
+#pragma clang diagnostic pop

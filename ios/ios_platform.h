@@ -41,6 +41,14 @@ void ios_super_debug_set(int on);   /* the launcher's switch: saved, and in effe
 long ios_debug_resident_mb(void);
 long ios_debug_avail_mb(void);
 
+/* Super Debug: logs every UIWindow and the SDL view hierarchy (frames, hidden/alpha/opaque, whether the GL layer has
+ * contents) and, if snapshot is nonzero, saves what UIKit itself composes for the SDL window to
+ * Documents/openug2-uikit-snapshot.png and logs how much of it is non-black. Main thread only. */
+void ios_debug_dump_windows(const char *tag, int snapshot);
+
+/* Saves an RGBA8 pixel buffer as Documents/<name> (alpha forced opaque; flip_y for GL's bottom-up rows). */
+void ios_debug_save_png(const char *name, const unsigned char *rgba, int w, int h, int flip_y);
+
 /* Called once per presented frame so the heartbeat thread can tell a stalled render loop from a slow one. */
 void ios_debug_note_frame(unsigned long long frame);
 
