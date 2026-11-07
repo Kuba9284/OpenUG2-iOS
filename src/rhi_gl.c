@@ -324,6 +324,35 @@ static void glt_selftest(void) {
     glt_drain();
 }
 
+
+/* Compatibility display (iOS): read the finished frame back and hand it to a UIKit view (see ios_platform.h). Also caps the
+ * loop at 60 fps -- without the GL layer's vsync the engine would otherwise spin at 200 fps. */
+static unsigned char *compat_buf;
+static size_t compat_cap;
+static Uint32 compat_last;
+
+static void ios_compat_present(void) {
+    const int w = g_rhi.frame_w, h = g_rhi.frame_h;
+    if (w <= 0 || h <= 0) return;
+    const size_t need = (size_t)w * (size_t)h * 4u;
+    if (need > compat_cap) {
+        free(compat_buf);
+        compat_buf = (unsigned char *)malloc(need);
+        compat_cap = compat_buf ? need : 0;
+        if (!compat_buf) return;
+    }
+    const Uint32 now = SDL_GetTicks();
+    if (compat_last && now - compat_last < 16u) SDL_Delay(16u - (now - compat_last));
+    compat_last = SDL_GetTicks();
+    GLint prev = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev);
+    const GLuint screen = screen_fbo();
+    if ((GLuint)prev != screen) glBindFramebuffer(GL_FRAMEBUFFER, screen);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, compat_buf);
+    if ((GLuint)prev != screen) glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev);
+    ios_display_present(compat_buf, w, h);
+}
+
 /* Reads the whole screen framebuffer back and summarises it: is anything on it besides black, and how varied is it? */
 static void glt_probe(void) {
     const int w = g_rhi.frame_w, h = g_rhi.frame_h;
@@ -697,6 +726,9 @@ RhiResult rhi_frame_begin(RhiFrameInfo *out) {
 RhiResult rhi_frame_end(void) {
     if (!g_rhi.context) return RHI_ERR_INVALID;
     GLT_PRESWAP();
+#ifdef OPENUG2_IOS
+    if (ios_compat_display()) ios_compat_present();
+#endif
     GLCHK();   /* anything raised during the frame, before the swap */
     GLT_SWAP_BEGIN();
     SDL_GL_SwapWindow(g_rhi.window);

@@ -290,7 +290,8 @@ static NSString *log_path(NSString *name) { return [g_docs_path stringByAppendin
             BOOL ready = [self ready];
             cell.textLabel.text = ready ? @"All required files found" : [NSString stringWithFormat:@"%ld required files missing", (long)self.scan.requiredMissing];
             cell.textLabel.textColor = ready ? UIColor.systemGreenColor : UIColor.systemRedColor;
-            cell.detailTextLabel.text = [NSString stringWithFormat:@"Super Debug Mode is %@ (Settings tab)", ios_super_debug() ? @"ON" : @"off"];
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"Compatibility display %@, Super Debug Mode %@ (Settings tab)",
+                                         ios_compat_display() ? @"ON" : @"off", ios_super_debug() ? @"ON" : @"off"];
         }
         return cell;
     }
@@ -351,31 +352,35 @@ static NSString *file_line(NSString *name) {
     return [NSString stringWithFormat:@"%@, %@", size_text([at[NSFileSize] unsignedLongLongValue]), [df stringFromDate:at[NSFileModificationDate]]];
 }
 
-/* sections: 0 debug, 1 logs, 2 device, 3 about */
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 4; }
+/* sections: 0 display, 1 debug, 2 logs, 3 device, 4 about */
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 5; }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
     switch (s) {
     case 0: return 1;
-    case 1: return 3;
-    case 2: return 6;
+    case 1: return 1;
+    case 2: return 3;
+    case 3: return 6;
     default: return 2;
     }
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
     switch (s) {
-    case 0: return @"Debugging";
-    case 1: return @"Logs";
-    case 2: return @"This device";
+    case 0: return @"Display";
+    case 1: return @"Debugging";
+    case 2: return @"Logs";
+    case 3: return @"This device";
     default: return @"About";
     }
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
     if (s == 0)
+        return @"Shows the game through a normal UIKit view instead of the OpenGL layer. Turn it on if the game screen stays black while the sound plays (seen on iOS 27 and inside LiveContainer). It copies every frame, so it costs some speed, and it caps the game at 60 fps.";
+    if (s == 1)
         return @"Logs the device and OpenGL limits, runs a GL self-test on the screen, checks every OpenGL call for errors and names the one that fails, inspects the rendered picture, and records per-second statistics, memory and lifecycle events. It slows the game down; leave it off for normal play.";
-    if (s == 1) return @"Each run writes Documents/openug2.log; the run before is kept as openug2-previous.log. Send the log after trying the game with Super Debug Mode on.";
+    if (s == 2) return @"Each run writes Documents/openug2.log; the run before is kept as openug2-previous.log. Send the log after trying the game with Super Debug Mode on.";
     return nil;
 }
 
@@ -383,11 +388,23 @@ static NSString *file_line(NSString *name) {
     ios_super_debug_set(sw.isOn);
 }
 
+- (void)compatSwitched:(UISwitch *)sw {
+    ios_compat_display_set(sw.isOn);
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.detailTextLabel.numberOfLines = 0;
     if (ip.section == 0) {
+        cell.textLabel.text = @"Compatibility display";
+        UISwitch *sw = [[UISwitch alloc] init];
+        sw.on = ios_compat_display() != 0;
+        [sw addTarget:self action:@selector(compatSwitched:) forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = sw;
+        return cell;
+    }
+    if (ip.section == 1) {
         cell.textLabel.text = @"Super Debug Mode";
         UISwitch *sw = [[UISwitch alloc] init];
         sw.on = ios_super_debug() != 0;
@@ -395,7 +412,7 @@ static NSString *file_line(NSString *name) {
         cell.accessoryView = sw;
         return cell;
     }
-    if (ip.section == 1) {
+    if (ip.section == 2) {
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         cell.textLabel.textColor = self.view.tintColor;
         if (ip.row == 0) { cell.textLabel.text = @"Share latest log"; cell.detailTextLabel.text = file_line(@"openug2.log"); }
@@ -405,7 +422,7 @@ static NSString *file_line(NSString *name) {
     }
     NSProcessInfo *pi = NSProcessInfo.processInfo;
     UIScreen *sc = UIScreen.mainScreen;
-    if (ip.section == 2) {
+    if (ip.section == 3) {
         switch (ip.row) {
         case 0: cell.textLabel.text = @"Model"; cell.detailTextLabel.text = machine_id(); break;
         case 1: cell.textLabel.text = @"iOS"; cell.detailTextLabel.text = UIDevice.currentDevice.systemVersion; break;
@@ -442,7 +459,7 @@ static NSString *file_line(NSString *name) {
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    if (ip.section != 1) return;
+    if (ip.section != 2) return;
     if (ip.row == 0) [self shareLog:@"openug2.log" from:ip];
     if (ip.row == 1) [self shareLog:@"openug2-previous.log" from:ip];
     if (ip.row == 2) {

@@ -37,6 +37,14 @@ void ios_platform_begin_log(void);
 int  ios_super_debug(void);
 void ios_super_debug_set(int on);   /* the launcher's switch: saved, and in effect for this run */
 
+/* Compatibility display (Settings; default ON): instead of relying on the OpenGL layer to reach the screen, each frame is
+ * read back from the GL framebuffer and shown in an ordinary UIKit view on top of it. A log of an iPhone 13 on iOS 27
+ * under LiveContainer showed a correct picture in the framebuffer while UIKit composed black: the GL layer's contents
+ * never became visible. ios_display_present() must run on the main thread (the engine does). */
+int  ios_compat_display(void);
+void ios_compat_display_set(int on);
+void ios_display_present(const unsigned char *rgba, int w, int h);   /* bottom-up RGBA8, as glReadPixels returns it */
+
 /* Process memory in MB (resident set / still available before iOS ends the app); -1 if unknown. */
 long ios_debug_resident_mb(void);
 long ios_debug_avail_mb(void);

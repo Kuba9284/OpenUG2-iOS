@@ -257,6 +257,7 @@ void ios_platform_begin_log(void) {
         fprintf(stderr, "OpenUG2 iOS log, %s\n", [df stringFromDate:[NSDate date]].UTF8String);
         fprintf(stderr, "OpenUG2 iOS: Documents = %s\n", g_docs);
         fprintf(stderr, "Super Debug Mode: %s\n", ios_super_debug() ? "ON" : "off");
+        fprintf(stderr, "Compatibility display: %s\n", ios_compat_display() ? "ON" : "off");
 
         signal(SIGSEGV, crash_signal); signal(SIGBUS, crash_signal); signal(SIGABRT, crash_signal);
         signal(SIGILL, crash_signal); signal(SIGFPE, crash_signal); signal(SIGTRAP, crash_signal);
@@ -363,3 +364,70 @@ void ios_debug_dump_windows(const char *tag, int snapshot) {
     }
 }
 #pragma clang diagnostic pop
+
+/* ---- compatibility display ---- */
+static NSString *const kCompatKey = @"ug2.compatDisplay";
+static int g_compat = -1;
+static UIView *g_overlay;
+
+int ios_compat_display(void) {
+    if (g_compat < 0) {
+        NSNumber *n = [[NSUserDefaults standardUserDefaults] objectForKey:kCompatKey];
+        g_compat = n ? (n.boolValue ? 1 : 0) : 1;   /* on unless the user turned it off */
+    }
+    return g_compat;
+}
+
+void ios_compat_display_set(int on) {
+    g_compat = on ? 1 : 0;
+    [[NSUserDefaults standardUserDefaults] setBool:(on != 0) forKey:kCompatKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+static UIView *overlay_view(void) {
+    if (g_overlay && g_overlay.window) return g_overlay;
+    UIWindow *sdlw = nil;
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        if (!w.hidden && [NSStringFromClass(w.class) rangeOfString:@"SDL"].location != NSNotFound) { sdlw = w; break; }
+    }
+    if (!sdlw) return nil;
+    UIView *ov = [[UIView alloc] initWithFrame:sdlw.bounds];
+    ov.userInteractionEnabled = NO;   /* touches still reach SDL's view underneath */
+    ov.opaque = YES;
+    ov.backgroundColor = UIColor.blackColor;
+    ov.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    ov.layer.contentsGravity = kCAGravityResize;
+    ov.layer.transform = CATransform3DMakeScale(1, -1, 1);   /* GL rows come bottom-up */
+    [sdlw addSubview:ov];
+    g_overlay = ov;
+    fprintf(stderr, "COMPAT display: overlay view installed on %s (%.0fx%.0f)\n", NSStringFromClass(sdlw.class).UTF8String,
+            sdlw.bounds.size.width, sdlw.bounds.size.height);
+    return ov;
+}
+#pragma clang diagnostic pop
+
+void ios_display_present(const unsigned char *rgba, int w, int h) {
+    if (!rgba || w <= 0 || h <= 0) return;
+    @autoreleasepool {
+        UIView *ov = overlay_view();
+        if (!ov) return;
+        static CGColorSpaceRef cs;
+        if (!cs) cs = CGColorSpaceCreateDeviceRGB();
+        CFDataRef data = CFDataCreate(NULL, rgba, (CFIndex)w * h * 4);   /* a copy: Core Animation reads it later */
+        CGDataProviderRef prov = CGDataProviderCreateWithCFData(data);
+        CGImageRef img = CGImageCreate((size_t)w, (size_t)h, 8, 32, (size_t)w * 4, cs, (CGBitmapInfo)kCGImageAlphaNoneSkipLast, prov, NULL, false,
+                                       kCGRenderingIntentDefault);
+        if (img) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            ov.layer.contents = (__bridge id)img;
+            [CATransaction commit];
+            [CATransaction flush];   /* the run loop that would commit this is not ours to wait for */
+            CGImageRelease(img);
+        }
+        CGDataProviderRelease(prov);
+        CFRelease(data);
+    }
+}
