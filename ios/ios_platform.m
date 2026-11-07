@@ -176,8 +176,8 @@ static void log_event(const SDL_Event *e) {
     if (!ios_super_debug()) return;
     static int touches;
     if (name) {
-        fprintf(stderr, "EVENT t=%.2fs %s subtype %d data %d,%d\n", CFAbsoluteTimeGetCurrent() - g_t0, name,
-                (int)e->display.event, (int)e->display.data1, (int)e->display.data2);
+        fprintf(stderr, "EVENT t=%.2fs %s subtype %d data %d\n", CFAbsoluteTimeGetCurrent() - g_t0, name,
+                (int)e->display.event, (int)e->display.data1);
     } else if (e->type == SDL_WINDOWEVENT) {
         fprintf(stderr, "EVENT t=%.2fs WINDOW %s %d,%d\n", CFAbsoluteTimeGetCurrent() - g_t0,
                 sdl_window_event_name(e->window.event), (int)e->window.data1, (int)e->window.data2);
