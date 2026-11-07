@@ -76,6 +76,11 @@ something this project can change. Options:
 - Textures are CPU-decoded to RGBA: iOS GPUs have no S3TC, and the engine already has this fallback.
   Expect higher memory use than desktop.
 
+## Name and icon
+The home-screen name is **NFSU2** (`CFBundleDisplayName` in `project.yml`; the build product is still `OpenUG2.app`).
+The icon is an original picture, not game artwork: `make_icon.py` draws it (`python3 make_icon.py`, needs Pillow and
+numpy) into `Assets.xcassets/AppIcon.appiconset/icon-1024.png`, which Xcode scales to every size.
+
 ## What changed in the engine
 Everything is behind `#ifdef OPENUG2_IOS` / `OPENUG2_TOUCH`, so desktop builds are unchanged:
 `src/main.c` (hooks), `src/controls_sdl.c` (two queries ask the touch layer), plus the new

@@ -13,6 +13,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef OPENUG2_IOS
+/* iOS diagnostics: drain and log GL errors at checkpoints through render_canvas (budgeted so a per-frame error cannot flood the log). */
+static void ugchk(const char *tag) {
+    static int budget = 24;
+    if (budget <= 0) { glGetError(); return; }
+    budget -= ug_gl_errors(tag);
+}
+#else
+#define ugchk(tag) ((void)0)
+#endif
+
 static const char *VS =
     "attribute vec2 aPos;\n"
     "attribute vec2 aLocal;\n"
@@ -215,6 +226,7 @@ void ug_gl_destroy(UgGL *g) {
 static void render_canvas(UgGL *g, const UgCanvas *cv, int win_w, int win_h, int overlay) {
     if (!g || cv->n == 0 || win_w <= 0 || win_h <= 0) return;
     UgView v = ug_view_fit(win_w, win_h);
+    ugchk("render_canvas: entry (raised before the menu draw)");
 
     /* Preserve every state this legacy GL/GLES2 renderer changes. */
     int prev_prog = 0, prev_buf = 0, prev_tex = 0, prev_tex0 = 0, prev_active = 0, prev_unpack = 0;
@@ -246,6 +258,7 @@ static void render_canvas(UgGL *g, const UgCanvas *cv, int win_w, int win_h, int
         glGetVertexAttribPointerv(i,GL_VERTEX_ATTRIB_ARRAY_POINTER,&prev_attr[i].pointer);
     }
 
+    ugchk("render_canvas: state queries");
     glViewport(overlay ? 0 : v.x0, overlay ? 0 : win_h - v.y0 - v.h,
                overlay ? win_w : v.w, overlay ? win_h : v.h);
     glScissor(overlay ? 0 : v.x0, overlay ? 0 : win_h - v.y0 - v.h,
@@ -268,6 +281,7 @@ static void render_canvas(UgGL *g, const UgCanvas *cv, int win_w, int win_h, int
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, g->tex);
     glUniform1i(g->uTex, 0);
+    ugchk("render_canvas: program and uniforms");
 
     glBindBuffer(GL_ARRAY_BUFFER, g->vbo);
     size_t bytes = sizeof(UgVertex) * (size_t)cv->n;
@@ -283,6 +297,7 @@ static void render_canvas(UgGL *g, const UgCanvas *cv, int win_w, int win_h, int
     glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, stride, (void *)offsetof(UgVertex, mode));
     glEnableVertexAttribArray(4);
     glVertexAttribPointer(4, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, (void *)offsetof(UgVertex, r));
+    ugchk("render_canvas: vertex upload and attribs");
     /* draw in runs of equal texture: 0 = built-in atlas, k = library texture k-1 */
     for (int i = 0; i < cv->n;) {
         int tex = cv->v[i].tex, j = i + 1;
@@ -296,6 +311,7 @@ static void render_canvas(UgGL *g, const UgCanvas *cv, int win_w, int win_h, int
         i = j;
     }
 
+    ugchk("render_canvas: draws");
     for (unsigned i = 0; i < 5; i++) {
         glBindBuffer(GL_ARRAY_BUFFER,(unsigned)prev_attr[i].buffer);
         glVertexAttribPointer(i,prev_attr[i].size,(GLenum)prev_attr[i].type,
@@ -315,6 +331,7 @@ static void render_canvas(UgGL *g, const UgCanvas *cv, int win_w, int win_h, int
     if (prev_cull) glEnable(GL_CULL_FACE);
     if (!prev_scissor) glDisable(GL_SCISSOR_TEST);
     glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
+    ugchk("render_canvas: state restore");
 }
 
 void ug_gl_render(UgGL *g, const UgCanvas *cv, int win_w, int win_h) {

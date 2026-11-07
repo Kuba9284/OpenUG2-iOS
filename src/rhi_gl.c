@@ -105,6 +105,15 @@ RhiResult rhi_prepare_window(RhiBackend backend) {
 #else
     /* macOS: no profile requested -> the legacy 2.1 context. */
 #endif
+#ifdef OPENUG2_IOS
+    /* SDL's default colour request (R3 G3 B2) gives the iOS GL view a 16-bit RGB565 renderbuffer with no alpha. Copying
+       that into an RGBA texture (glCopyTexImage2D, the post-processing screen grab) is GL_INVALID_OPERATION in ES2, and
+       565 bands badly. Ask for RGBA8 explicitly. */
+    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
+#endif
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
@@ -226,13 +235,17 @@ void rhi_device_destroy(void) {
 /* iOS diagnostics: a stray GL error silently disables later uploads (see rhi_buffer_create). GLCHK() drains the error
  * queue at a checkpoint and names where it was first seen: the log shows which backend function raised it. */
 static void ios_gl_check(const char *where, int line) {
-    static int reported;
+    static const char *seen_fn[64];   /* each distinct (function, line) is reported once, with the frame it first happened in */
+    static int seen_line[64], nseen;
     GLenum e;
     for (int i = 0; i < 16 && (e = glGetError()) != GL_NO_ERROR; i++) {
-        if (reported < 40) {
-            reported++;
-            fprintf(stderr, "rhi: GL error %s (0x%04x) raised at or before %s:%d\n", gl_error_name(e), (unsigned)e, where, line);
-        }
+        int dup = 0;
+        for (int k = 0; k < nseen; k++)
+            if (seen_line[k] == line && strcmp(seen_fn[k], where) == 0) { dup = 1; break; }
+        if (dup || nseen >= 64) continue;
+        seen_fn[nseen] = where; seen_line[nseen] = line; nseen++;
+        fprintf(stderr, "rhi: GL error %s (0x%04x) raised at or before %s:%d (first seen in frame %llu)\n",
+                gl_error_name(e), (unsigned)e, where, line, (unsigned long long)g_rhi.frame_index);
     }
 }
 #define GLCHK() ios_gl_check(__func__, __LINE__)
@@ -266,7 +279,9 @@ RhiResult rhi_frame_begin(RhiFrameInfo *out) {
 
 RhiResult rhi_frame_end(void) {
     if (!g_rhi.context) return RHI_ERR_INVALID;
+    GLCHK();   /* anything raised during the frame, before the swap */
     SDL_GL_SwapWindow(g_rhi.window);
+    GLCHK();   /* raised by the swap itself */
     g_rhi.frame_index++;
     g_rhi.in_frame = 0;
     return RHI_OK;
@@ -1595,7 +1610,17 @@ RhiResult rhi_cmd_copy_main_to_texture(RhiTexture texture, int32_t x, int32_t y,
         for (uint32_t i = 0; i < RHI_GL_MAX_FRAMEBUFFERS; i++)
             if (g_fbos[i].color_name == t->name) g_fbos[i].complete = 0;
     } else glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, x, y, w, h);
+#ifdef OPENUG2_IOS
+    const GLenum copy_err = glGetError();
+    if (copy_err != GL_NO_ERROR) {
+        static int told;
+        if (told++ < 5)
+            fprintf(stderr, "rhi: copy_main_to_texture %dx%d failed: %s (0x%04x)\n", (int)w, (int)h, gl_error_name(copy_err), (unsigned)copy_err);
+    }
+    RhiResult result = copy_err == GL_NO_ERROR ? RHI_OK : RHI_ERR_UNSUPPORTED;
+#else
     RhiResult result = glGetError() == GL_NO_ERROR ? RHI_OK : RHI_ERR_UNSUPPORTED;
+#endif
     work_unit_done(active);
     if ((GLuint)framebuffer != screen) glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)framebuffer);
     if (result != RHI_OK) return result;
@@ -1607,6 +1632,7 @@ RhiResult rhi_cmd_copy_main_to_texture(RhiTexture texture, int32_t x, int32_t y,
 RhiResult rhi_cmd_set_viewport(int32_t x, int32_t y, int32_t width, int32_t height) {
     if (width < 0 || height < 0) return RHI_ERR_INVALID;
     glViewport(x, y, width, height);
+    GLCHK();
     return RHI_OK;
 }
 
