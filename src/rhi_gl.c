@@ -7,6 +7,7 @@
 #include "rhi_gl_state.h"   /* GL headers; SDL_GL_*Context go through the tracker */
 #ifdef OPENUG2_IOS
 #include <SDL_syswm.h>   /* uikit.framebuffer: the GL view's framebuffer object */
+#include "ios_platform.h"   /* Super Debug Mode switch, memory and frame notes */
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,6 +80,364 @@ static GLuint screen_fbo(void) {
 }
 #else
 static inline GLuint screen_fbo(void) { return 0; }   /* desktop: the default framebuffer */
+#endif
+
+
+#ifdef OPENUG2_IOS
+/* ------------------------------------------------------------------------------------------------------------- */
+/* Super Debug Mode (iOS): GL call tracing, device report, self-test, picture probe, statistics                   */
+/* ------------------------------------------------------------------------------------------------------------- */
+/* Everything here is inert unless the launcher's Super Debug switch is on (ios_super_debug()). The macros in
+ * rhi_gl_trace.h make every GL call of this file end in glt_after(); the functions below must therefore be defined
+ * BEFORE that header is included, so their own GL calls are not traced (they would recurse). */
+#define GLT_STAT(x) x
+
+typedef struct { const char *fn; int line; unsigned long long calls, errors, mark; } GltSite;
+enum { GLT_SLOTS = 4096 };
+static GltSite glt_site[GLT_SLOTS];
+static struct {
+    unsigned long long errors_total, frame_calls, draws, tris, acc_calls, acc_draws, acc_tris;
+    unsigned tex_created, buf_created;
+    unsigned long long tex_bytes, buf_bytes;
+} glt;
+
+static const char *glt_err_name(GLenum e) {
+    switch (e) {
+    case GL_INVALID_ENUM: return "GL_INVALID_ENUM";
+    case GL_INVALID_VALUE: return "GL_INVALID_VALUE";
+    case GL_INVALID_OPERATION: return "GL_INVALID_OPERATION";
+    case GL_OUT_OF_MEMORY: return "GL_OUT_OF_MEMORY";
+    case GL_INVALID_FRAMEBUFFER_OPERATION: return "GL_INVALID_FRAMEBUFFER_OPERATION";
+    default: return "unknown GL error";
+    }
+}
+
+static GltSite *glt_site_for(const char *fn, int line) {
+    unsigned h = (unsigned)(((uintptr_t)fn >> 3) * 2654435761u) ^ ((unsigned)line * 40503u);
+    for (unsigned i = 0; i < GLT_SLOTS; i++) {
+        GltSite *s = &glt_site[(h + i) & (GLT_SLOTS - 1)];
+        if (!s->fn) { s->fn = fn; s->line = line; return s; }
+        if (s->fn == fn && s->line == line) return s;
+    }
+    return NULL;
+}
+
+/* Tracing reads glGetError after every call, which would clear the error the backend's own checks (gl_take_error,
+ * the copy-to-texture check ...) are about to look for -- and change what the engine does. So the error seen by the
+ * tracer is kept here and handed back by the glGetError() macro below, exactly as if it had never been read. */
+static GLenum glt_stash;
+static GLenum glt_get_error(void) {
+    if (glt_stash) { GLenum e = glt_stash; glt_stash = GL_NO_ERROR; return e; }
+    return glGetError();
+}
+
+static void glt_drain(void) { for (int i = 0; i < 16 && glGetError() != GL_NO_ERROR; i++) {} }
+
+/* The bits of GL state that usually explain an error. */
+static void glt_state(char *out, size_t n) {
+    GLint fbo = -1, prog = -1, vp[4] = {0, 0, 0, 0}, ab = -1, active = -1;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+    glGetIntegerv(GL_VIEWPORT, vp);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &ab);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+    glt_drain();
+    snprintf(out, n, "fbo %d (screen fbo %u), program %d, viewport %d,%d,%d,%d, array buffer %d, active texture 0x%x",
+             (int)fbo, (unsigned)screen_fbo(), (int)prog, (int)vp[0], (int)vp[1], (int)vp[2], (int)vp[3], (int)ab, (unsigned)active);
+}
+
+/* Called after every GL call of this file (see rhi_gl_trace.h): checks glGetError and names the call. The error
+ * queue is drained at each frame boundary, so the first error seen here belongs to this call (or, rarely, to an
+ * untraced call made just before it from outside this file). */
+static void glt_after(const char *fn, int line) {
+    if (!ios_super_debug()) return;
+    GltSite *s = glt_site_for(fn, line);
+    glt.frame_calls++;
+    if (s) s->calls++;
+    GLenum e = glGetError();
+    if (e == GL_NO_ERROR) return;
+    glt_drain();
+    if (!glt_stash) glt_stash = e;   /* still there for the backend's own checks */
+    glt.errors_total++;
+    if (s && ++s->errors > 1) return;   /* each call site reported once; the count is in the statistics */
+    static unsigned unslotted;
+    if (!s && unslotted++ > 20) return;
+    char st[256];
+    glt_state(st, sizeof st);
+    fprintf(stderr, "GLTRACE: %s (0x%04x) raised by %s at rhi_gl.c:%d, frame %llu; %s\n", glt_err_name(e), (unsigned)e, fn, line,
+            (unsigned long long)g_rhi.frame_index, st);
+}
+
+/* An error found at a point where no traced call just ran: it came from outside rhi_gl.c's calls (the menu renderer,
+ * SDL's own GL use, the state tracker, or the swap). */
+static void glt_boundary(const char *what) {
+    static struct { const char *w; unsigned n; } seen[8];
+    GLenum e = glGetError();
+    if (e == GL_NO_ERROR) return;
+    glt_drain();
+    glt.errors_total++;
+    unsigned *n = NULL;
+    for (int i = 0; i < 8; i++) {
+        if (!seen[i].w) seen[i].w = what;
+        if (seen[i].w == what) { n = &seen[i].n; break; }
+    }
+    if (n && (*n)++ >= 3) return;
+    char st[256];
+    glt_state(st, sizeof st);
+    fprintf(stderr, "GLTRACE: %s (0x%04x) pending at %s, frame %llu: raised outside the traced backend calls (menu renderer, SDL, tracker or the swap); %s\n",
+            glt_err_name(e), (unsigned)e, what, (unsigned long long)g_rhi.frame_index, st);
+}
+
+static void glt_device_report(void) {
+    static const struct { GLenum e; const char *n; } lim[] = {
+        { GL_MAX_TEXTURE_SIZE, "MAX_TEXTURE_SIZE" }, { GL_MAX_CUBE_MAP_TEXTURE_SIZE, "MAX_CUBE_MAP_TEXTURE_SIZE" },
+        { GL_MAX_RENDERBUFFER_SIZE, "MAX_RENDERBUFFER_SIZE" }, { GL_MAX_VERTEX_ATTRIBS, "MAX_VERTEX_ATTRIBS" },
+        { GL_MAX_VERTEX_UNIFORM_VECTORS, "MAX_VERTEX_UNIFORM_VECTORS" }, { GL_MAX_FRAGMENT_UNIFORM_VECTORS, "MAX_FRAGMENT_UNIFORM_VECTORS" },
+        { GL_MAX_VARYING_VECTORS, "MAX_VARYING_VECTORS" }, { GL_MAX_TEXTURE_IMAGE_UNITS, "MAX_TEXTURE_IMAGE_UNITS" },
+        { GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS, "MAX_VERTEX_TEXTURE_IMAGE_UNITS" }, { GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, "MAX_COMBINED_TEXTURE_IMAGE_UNITS" },
+    };
+    glt_drain();
+    fprintf(stderr, "GLDEBUG shading language: %s\n", (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION));
+    for (size_t i = 0; i < sizeof lim / sizeof lim[0]; i++) {
+        GLint v = -1;
+        glGetIntegerv(lim[i].e, &v);
+        fprintf(stderr, "GLDEBUG limit %s = %d\n", lim[i].n, (int)v);
+    }
+    GLint vd[2] = {0, 0}, lw[2] = {0, 0};
+    glGetIntegerv(GL_MAX_VIEWPORT_DIMS, vd);
+    glGetIntegerv(GL_ALIASED_LINE_WIDTH_RANGE, lw);
+    fprintf(stderr, "GLDEBUG limit MAX_VIEWPORT_DIMS = %d x %d, line width %d..%d\n", (int)vd[0], (int)vd[1], (int)lw[0], (int)lw[1]);
+    GLint rb = -1, gb = -1, bb = -1, ab = -1, db = -1, sb = -1;
+    glGetIntegerv(GL_RED_BITS, &rb); glGetIntegerv(GL_GREEN_BITS, &gb); glGetIntegerv(GL_BLUE_BITS, &bb);
+    glGetIntegerv(GL_ALPHA_BITS, &ab); glGetIntegerv(GL_DEPTH_BITS, &db); glGetIntegerv(GL_STENCIL_BITS, &sb);
+    fprintf(stderr, "GLDEBUG bound framebuffer %u bits: R%d G%d B%d A%d depth %d stencil %d\n", (unsigned)screen_fbo(), (int)rb, (int)gb, (int)bb, (int)ab, (int)db, (int)sb);
+    int sr = -1, sg = -1, sbl = -1, sa = -1, sd = -1, ss = -1, dbl = -1;
+    SDL_GL_GetAttribute(SDL_GL_RED_SIZE, &sr); SDL_GL_GetAttribute(SDL_GL_GREEN_SIZE, &sg); SDL_GL_GetAttribute(SDL_GL_BLUE_SIZE, &sbl);
+    SDL_GL_GetAttribute(SDL_GL_ALPHA_SIZE, &sa); SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &sd); SDL_GL_GetAttribute(SDL_GL_STENCIL_SIZE, &ss);
+    SDL_GL_GetAttribute(SDL_GL_DOUBLEBUFFER, &dbl);
+    fprintf(stderr, "GLDEBUG SDL attributes got: R%d G%d B%d A%d depth %d stencil %d doublebuffer %d\n", sr, sg, sbl, sa, sd, ss, dbl);
+    GLint prange[2] = {0, 0}, pprec = 0;
+    glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_HIGH_FLOAT, prange, &pprec);
+    GLint mrange[2] = {0, 0}, mprec = 0;
+    glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_MEDIUM_FLOAT, mrange, &mprec);
+    fprintf(stderr, "GLDEBUG fragment float precision: highp range 2^%d..2^%d (%d bits), mediump range 2^%d..2^%d (%d bits)\n",
+            (int)prange[0], (int)prange[1], (int)pprec, (int)mrange[0], (int)mrange[1], (int)mprec);
+    int ww = 0, wh = 0, dw = 0, dh = 0;
+    SDL_GetWindowSize(g_rhi.window, &ww, &wh);
+    SDL_GL_GetDrawableSize(g_rhi.window, &dw, &dh);
+    SDL_DisplayMode dm;
+    memset(&dm, 0, sizeof dm);
+    SDL_GetCurrentDisplayMode(0, &dm);
+    fprintf(stderr, "GLDEBUG window %dx%d points, drawable %dx%d pixels, flags 0x%x, display mode %dx%d @%d Hz\n", ww, wh, dw, dh,
+            (unsigned)SDL_GetWindowFlags(g_rhi.window), dm.w, dm.h, dm.refresh_rate);
+    const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+    fprintf(stderr, "GLDEBUG extensions:\n");
+    char line[200];
+    size_t used = 0;
+    line[0] = 0;
+    for (const char *p = ext ? ext : ""; *p;) {
+        const char *q = p;
+        while (*q && *q != ' ') q++;
+        size_t len = (size_t)(q - p);
+        if (len && used + len + 2 >= sizeof line) { fprintf(stderr, "GLDEBUG   %s\n", line); used = 0; line[0] = 0; }
+        if (len && len + 2 < sizeof line) { memcpy(line + used, p, len); used += len; line[used++] = ' '; line[used] = 0; }
+        p = *q ? q + 1 : q;
+    }
+    if (used) fprintf(stderr, "GLDEBUG   %s\n", line);
+    glt_drain();
+}
+
+/* Does the screen framebuffer take a clear and a draw at all, independent of anything the engine does? A magenta clear
+ * then a green full-screen triangle through a tiny shader of our own, each read back from the framebuffer. */
+static void glt_selftest(void) {
+    int w = 0, h = 0;
+    SDL_GL_GetDrawableSize(g_rhi.window, &w, &h);
+    if (w <= 0 || h <= 0) { fprintf(stderr, "GLSELFTEST: no drawable (%dx%d)\n", w, h); return; }
+    GLint prev_fbo = 0, prev_vp[4] = {0, 0, w, h};
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fbo);
+    glGetIntegerv(GL_VIEWPORT, prev_vp);
+    glt_drain();
+    const GLuint screen = screen_fbo();
+    glBindFramebuffer(GL_FRAMEBUFFER, screen);
+    const GLenum fb = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glViewport(0, 0, w, h);
+    glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    unsigned char px[4] = {0, 0, 0, 0};
+    glReadPixels(w / 2, h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    GLenum e1 = glGetError();
+    glt_drain();
+    fprintf(stderr, "GLSELFTEST 1 (clear): screen fbo %u status 0x%x; cleared magenta, centre pixel reads %u,%u,%u,%u (want 255,0,255,255) error 0x%x -> %s\n",
+            (unsigned)screen, (unsigned)fb, px[0], px[1], px[2], px[3], (unsigned)e1,
+            (px[0] == 255 && px[1] == 0 && px[2] == 255) ? "PASS" : "FAIL");
+
+    static const char *vs = "attribute vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+    static const char *fs = "precision mediump float;\nvoid main() { gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+    GLuint sh[2] = {0, 0};
+    const GLenum types[2] = { GL_VERTEX_SHADER, GL_FRAGMENT_SHADER };
+    const char *srcs[2] = { vs, fs };
+    int compiled = 1;
+    for (int i = 0; i < 2; i++) {
+        sh[i] = glCreateShader(types[i]);
+        glShaderSource(sh[i], 1, &srcs[i], NULL);
+        glCompileShader(sh[i]);
+        GLint ok = 0;
+        glGetShaderiv(sh[i], GL_COMPILE_STATUS, &ok);
+        char log[512] = "";
+        glGetShaderInfoLog(sh[i], (GLsizei)sizeof log, NULL, log);
+        if (!ok) compiled = 0;
+        fprintf(stderr, "GLSELFTEST 2: %s shader %s%s%s\n", i ? "fragment" : "vertex", ok ? "compiled" : "FAILED", log[0] ? ": " : "", log);
+    }
+    if (compiled) {
+        GLuint prog = glCreateProgram();
+        glAttachShader(prog, sh[0]);
+        glAttachShader(prog, sh[1]);
+        glBindAttribLocation(prog, 0, "p");
+        glLinkProgram(prog);
+        GLint ok = 0;
+        glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+        char log[512] = "";
+        glGetProgramInfoLog(prog, (GLsizei)sizeof log, NULL, log);
+        fprintf(stderr, "GLSELFTEST 2: program link %s%s%s\n", ok ? "ok" : "FAILED", log[0] ? ": " : "", log);
+        if (ok) {
+            static const GLfloat tri[] = { -1.0f, -1.0f, 3.0f, -1.0f, -1.0f, 3.0f };
+            glUseProgram(prog);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, tri);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            unsigned char q[4] = {0, 0, 0, 0};
+            glReadPixels(w / 2, h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, q);
+            GLenum e2 = glGetError();
+            glt_drain();
+            fprintf(stderr, "GLSELFTEST 2 (shader + draw): green triangle, centre pixel reads %u,%u,%u,%u (want 0,255,0,255) error 0x%x -> %s\n",
+                    q[0], q[1], q[2], q[3], (unsigned)e2, (q[0] == 0 && q[1] == 255 && q[2] == 0) ? "PASS" : "FAIL");
+            glDisableVertexAttribArray(0);
+            glUseProgram(0);
+        }
+        glDeleteProgram(prog);
+    }
+    for (int i = 0; i < 2; i++) if (sh[i]) glDeleteShader(sh[i]);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
+    glt_drain();
+}
+
+/* Reads the whole screen framebuffer back and summarises it: is anything on it besides black, and how varied is it? */
+static void glt_probe(void) {
+    const int w = g_rhi.frame_w, h = g_rhi.frame_h;
+    if (w <= 0 || h <= 0 || (long)w * h > 6000000L) return;
+    unsigned char *px = (unsigned char *)malloc((size_t)w * (size_t)h * 4u);
+    if (!px) return;
+    GLint prev = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev);
+    const GLuint screen = screen_fbo();
+    if ((GLuint)prev != screen) glBindFramebuffer(GL_FRAMEBUFFER, screen);
+    glt_drain();
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    const GLenum e = glGetError();
+    glt_drain();
+    if ((GLuint)prev != screen) glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev);
+    if (e != GL_NO_ERROR) {
+        fprintf(stderr, "PROBE frame %llu: glReadPixels failed: %s\n", (unsigned long long)g_rhi.frame_index, glt_err_name(e));
+        free(px);
+        return;
+    }
+    static unsigned char bins[512];   /* 4 bits per channel -> 4096 colour bins */
+    memset(bins, 0, sizeof bins);
+    unsigned long long sum[4] = {0, 0, 0, 0}, nonblack = 0, quad_nb[4] = {0, 0, 0, 0};
+    unsigned distinct = 0;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            const unsigned char *p = px + ((size_t)y * w + x) * 4u;
+            sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2]; sum[3] += p[3];
+            if (p[0] > 8 || p[1] > 8 || p[2] > 8) { nonblack++; quad_nb[(y >= h / 2) * 2 + (x >= w / 2)]++; }
+            unsigned bin = ((unsigned)(p[0] >> 4) << 8) | ((unsigned)(p[1] >> 4) << 4) | (unsigned)(p[2] >> 4);
+            if (!(bins[bin >> 3] & (1u << (bin & 7)))) { bins[bin >> 3] |= (unsigned char)(1u << (bin & 7)); distinct++; }
+        }
+    }
+    const unsigned long long total = (unsigned long long)w * (unsigned long long)h, qn = total / 4 ? total / 4 : 1;
+    const unsigned char *c = px + ((size_t)(h / 2) * w + w / 2) * 4u;
+    fprintf(stderr, "PROBE frame %llu: screen %dx%d  non-black %.1f%% (quadrants bottom-left/right, top-left/right: %.0f/%.0f/%.0f/%.0f%%)  avg RGBA %llu,%llu,%llu,%llu  centre %u,%u,%u,%u  distinct colours %u -> %s\n",
+            (unsigned long long)g_rhi.frame_index, w, h, 100.0 * (double)nonblack / (double)total,
+            100.0 * (double)quad_nb[0] / (double)qn, 100.0 * (double)quad_nb[1] / (double)qn, 100.0 * (double)quad_nb[2] / (double)qn, 100.0 * (double)quad_nb[3] / (double)qn,
+            sum[0] / total, sum[1] / total, sum[2] / total, sum[3] / total, c[0], c[1], c[2], c[3], distinct,
+            nonblack == 0 ? "ALL BLACK: nothing reached the screen buffer" : distinct < 4 ? "flat: one or two colours only" : "has picture content");
+    free(px);
+}
+
+static void glt_census(void) {
+    fprintf(stderr, "GLCENSUS frame %llu: %llu GL calls, %llu draws, %llu triangles; busiest call sites this frame:\n",
+            (unsigned long long)g_rhi.frame_index, glt.frame_calls, glt.draws, glt.tris);
+    for (int k = 0; k < 14; k++) {
+        GltSite *best = NULL;
+        unsigned long long bd = 0;
+        for (unsigned i = 0; i < GLT_SLOTS; i++) {
+            GltSite *s = &glt_site[i];
+            if (s->fn && s->calls - s->mark > bd) { bd = s->calls - s->mark; best = s; }
+        }
+        if (!best) break;
+        fprintf(stderr, "GLCENSUS   %6llu x %s (rhi_gl.c:%d)\n", bd, best->fn, best->line);
+        best->mark = best->calls;   /* listed: skip it in the next round */
+    }
+}
+
+static void glt_mark_all(void) {
+    for (unsigned i = 0; i < GLT_SLOTS; i++) glt_site[i].mark = glt_site[i].calls;
+}
+
+static void glt_frame_begin(void) {
+    if (!ios_super_debug()) return;
+    glt_boundary("frame begin");
+}
+
+static void glt_preswap(void) {
+    if (!ios_super_debug()) return;
+    glt_boundary("pre-swap");
+    const unsigned long long f = g_rhi.frame_index;
+    if (f <= 3 || f == 5 || f == 10 || f == 30 || f == 100 || f % 600 == 0) glt_probe();
+}
+
+static void glt_postswap(void) {
+    if (!ios_super_debug()) return;
+    glt_boundary("post-swap");
+    static Uint32 last_ms;
+    static unsigned long long last_frame;
+    const unsigned long long f = g_rhi.frame_index;
+    if (f == 1 || f == 299) glt_mark_all();
+    if (f == 2 || f == 300) glt_census();
+    glt.acc_calls += glt.frame_calls; glt.acc_draws += glt.draws; glt.acc_tris += glt.tris;
+    glt.frame_calls = glt.draws = glt.tris = 0;
+    const Uint32 now = SDL_GetTicks();
+    if (!last_ms) { last_ms = now; last_frame = f; return; }
+    if (now - last_ms >= 1000) {
+        const unsigned long long frames = f + 1 - last_frame;
+        unsigned long long sites = 0, site_errors = 0;
+        for (unsigned i = 0; i < GLT_SLOTS; i++) if (glt_site[i].fn) { sites++; site_errors += glt_site[i].errors ? 1 : 0; }
+        fprintf(stderr, "STATS frame %llu: %.1f fps, per frame %llu GL calls %llu draws %llu triangles; GL errors so far %llu (%llu call sites); textures %u (~%llu MB), buffers %u (%llu MB); resident %ld MB, available %ld MB\n",
+                (unsigned long long)f, 1000.0 * (double)frames / (double)(now - last_ms), glt.acc_calls / frames, glt.acc_draws / frames, glt.acc_tris / frames,
+                glt.errors_total, site_errors, glt.tex_created, glt.tex_bytes >> 20, glt.buf_created, glt.buf_bytes >> 20,
+                ios_debug_resident_mb(), ios_debug_avail_mb());
+        (void)sites;
+        glt.acc_calls = glt.acc_draws = glt.acc_tris = 0;
+        last_ms = now;
+        last_frame = f + 1;
+    }
+}
+
+#define GLT_FRAME_BEGIN() glt_frame_begin()
+#define GLT_PRESWAP() glt_preswap()
+#define GLT_POSTSWAP() glt_postswap()
+#define GLT_DRAW(n_) do { glt.draws++; glt.tris += (unsigned long long)(n_); } while (0)
+
+#include "rhi_gl_trace.h"   /* from here on every GL call in this file is checked (Super Debug Mode) */
+#else
+#define GLT_STAT(x) ((void)0)
+#define GLT_FRAME_BEGIN() ((void)0)
+#define GLT_PRESWAP() ((void)0)
+#define GLT_POSTSWAP() ((void)0)
+#define GLT_DRAW(n_) ((void)0)
 #endif
 
 static RhiBackend resolve(RhiBackend backend) {
@@ -219,6 +578,11 @@ RhiResult rhi_device_create(const RhiDeviceDesc *desc) {
             (const char *)glGetString(GL_VENDOR), (const char *)glGetString(GL_RENDERER),
             (const char *)glGetString(GL_VERSION), (unsigned)screen_fbo());
     fflush(stderr);
+    if (ios_super_debug()) {
+        glt_device_report();
+        glt_selftest();
+        fflush(stderr);
+    }
 #endif
     SDL_GL_SetSwapInterval((desc->flags & RHI_DEVICE_VSYNC) ? 1 : 0);
     return RHI_OK;
@@ -273,15 +637,21 @@ RhiResult rhi_frame_begin(RhiFrameInfo *out) {
         out->height = g_rhi.frame_h;
         out->frame_index = g_rhi.frame_index;
     }
+    GLT_FRAME_BEGIN();
     GLCHK();
     return RHI_OK;
 }
 
 RhiResult rhi_frame_end(void) {
     if (!g_rhi.context) return RHI_ERR_INVALID;
+    GLT_PRESWAP();
     GLCHK();   /* anything raised during the frame, before the swap */
     SDL_GL_SwapWindow(g_rhi.window);
     GLCHK();   /* raised by the swap itself */
+    GLT_POSTSWAP();
+#ifdef OPENUG2_IOS
+    ios_debug_note_frame(g_rhi.frame_index);
+#endif
     g_rhi.frame_index++;
     g_rhi.in_frame = 0;
     return RHI_OK;
@@ -421,6 +791,7 @@ RhiBuffer rhi_buffer_create(const RhiBufferDesc *desc) {
         glBindBuffer(b->target, name);
         glBufferData(b->target, (GLsizeiptr)desc->size, desc->data, b->hint);
         b->size = desc->size;
+        GLT_STAT(glt.buf_created++; glt.buf_bytes += desc->size);
         GLenum err = desc->update == RHI_UPDATE_STATIC ? gl_take_error() : GL_NO_ERROR;
         if (stale || err) {
             if (stale)
@@ -626,6 +997,7 @@ RhiTexture rhi_texture_create(const RhiTextureDesc *desc) {
         return out;
     }
     work_unit_done(work_unit_bind(t->target, name));
+    GLT_STAT(glt.tex_created++; glt.tex_bytes += (unsigned long long)desc->width * (unsigned long long)desc->height * 4ull);
     GLCHK();
     return out;
 }
@@ -925,6 +1297,17 @@ RhiShader rhi_shader_create(const RhiShaderDesc *desc) {
         glDeleteProgram(p);
         return out;
     }
+#ifdef OPENUG2_IOS
+    if (ios_super_debug()) {   /* what the driver made of it: Apple's compiler warns in the info log even on success */
+        GLint na = 0, nu = 0;
+        char log[512] = "";
+        glGetProgramiv(p, GL_ACTIVE_ATTRIBUTES, &na);
+        glGetProgramiv(p, GL_ACTIVE_UNIFORMS, &nu);
+        glGetProgramInfoLog(p, (GLsizei)sizeof log, NULL, log);
+        fprintf(stderr, "GLDEBUG shader '%s' linked: program %u, %d attributes, %d uniforms%s%s\n", label, (unsigned)p, (int)na, (int)nu,
+                log[0] ? "; info log: " : "", log);
+    }
+#endif
     if (desc->param_block_count > RHI_GL_MAX_PARAM_BLOCKS ||
         (desc->param_block_count && !desc->param_blocks)) {
         fprintf(stderr, "rhi: %s: too many parameter blocks\n", label);
@@ -1297,6 +1680,7 @@ void rhi_cmd_draw_indexed(uint32_t index_count, uint32_t first_index) {
     if (!d) return;
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index->name);
     rhi_gl_flush_params();
+    GLT_DRAW(index_count / 3u);
     GLCHK();   /* setup vs draw: tell them apart */
     glDrawElements(gl_primitive(d->primitive), (GLsizei)index_count, GL_UNSIGNED_SHORT,
                    (const void *)((uintptr_t)first_index * 2u));
@@ -1312,6 +1696,7 @@ void rhi_cmd_draw(uint32_t vertex_count, uint32_t first_vertex) {
     const RhiPipelineDesc *d = draw_setup("draw", vertex_count, first_vertex);
     if (!d) return;
     rhi_gl_flush_params();
+    GLT_DRAW(vertex_count / 3u);
     GLCHK();
     glDrawArrays(gl_primitive(d->primitive), (GLint)first_vertex, (GLsizei)vertex_count);
     GLCHK();

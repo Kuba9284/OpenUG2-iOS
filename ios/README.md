@@ -44,6 +44,22 @@ If the game files are missing, the app shows a dialog with the exact folder it i
 The default car and track are the engine's defaults (`CARS/HUMMER`, `TRACKS/STREAML4RA`), so those must be
 present. The start menu offers **Free Roam** and **Race Select**.
 
+## Launcher and Super Debug Mode
+
+The app opens on a native two-tab screen before the engine starts.
+
+- **Play** lists the required and recommended NFSU2 files with a tick or cross, sizes and the exact folder it looked
+  in (it also finds them one or two folders down, e.g. `Documents/NFSU2/TRACKS`). Play is enabled once the required
+  files exist; missing recommended files only trigger a warning.
+- **Settings** has the **Super Debug Mode** switch, buttons to share the latest or previous log, and device info.
+
+Super Debug Mode writes a lot more to `openug2.log` (the run before is kept as `openug2-previous.log`):
+`ENV` device and host details, `GLDEBUG` limits/extensions/precision, `GLSELFTEST` (a clear and a shader draw read
+back from the screen buffer), `GLTRACE` (the first error of every GL call site, with call name, line, frame and
+bound state), `PROBE` (is the screen buffer all black?), `GLCENSUS` (busiest GL calls in a frame), `STATS` (fps, draws,
+triangles, GL errors, texture/buffer totals, memory per second), `HEARTBEAT` (every 2 s from a separate thread, so a
+stalled render loop is visible), and `EVENT` lines for lifecycle, window and touch events. It slows the game down.
+
 ## Controls
 | Where | What |
 |---|---|

@@ -8,13 +8,14 @@
 # renderers that preserve the full GL context state themselves and have their
 # own tests for it, like Dear ImGui -- they are not rhi.h clients):
 #   rhi_gl.c / rhi_gl.h / rhi_gl_state.c / rhi_gl_state.h  the GL backend itself
+#   rhi_gl_trace.h                                         its iOS Super Debug call tracer
 #   debugui.cpp                                            Dear ImGui's GL2 backend
 #   ugui/ugui_gl.c / ugui/ugui_gl.h                        the ugui library's GL backend
 # Everything else -- the whole game renderer -- reaches the GPU only through rhi.h.
 set -eu
 
 root=${1:-src}
-allow="rhi_gl.c rhi_gl.h rhi_gl_state.c rhi_gl_state.h debugui.cpp ugui_gl.c ugui_gl.h"
+allow="rhi_gl.c rhi_gl.h rhi_gl_state.c rhi_gl_state.h rhi_gl_trace.h debugui.cpp ugui_gl.c ugui_gl.h"
 
 fail=0
 # -- find source files, skip the allowed owners by basename --

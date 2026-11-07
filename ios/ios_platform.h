@@ -16,8 +16,33 @@ extern "C" {
 #endif
 
 /* Call first thing in main(), before SDL_Init. Sets the SDL hints, chdir()s into Documents and returns that
- * directory (valid for the life of the process; never NULL -- "." if the lookup failed). */
+ * directory (valid for the life of the process; never NULL -- "." if the lookup failed). Does not start the log:
+ * the launcher runs first (ios_launcher_run) and the log starts when Play is tapped (ios_platform_begin_log). */
 const char *ios_platform_init(void);
+
+/* The launcher (ios_launcher.m): a native two-tab screen shown before the engine starts. "Play" checks the NFSU2
+ * files and starts the game, "Settings" holds Super Debug Mode and log sharing. Blocks until Play is tapped, then
+ * returns 1 and writes the game data folder (Documents, or a folder inside it that holds TRACKS and CARS) to
+ * root_out. Returns 0 if the launcher could not be shown (the caller carries on with Documents). */
+int ios_launcher_run(const char *docs, char *root_out, size_t root_cap);
+
+/* Starts logging: moves the last run's openug2.log to openug2-previous.log, sends stderr and stdout to a fresh
+ * openug2.log, writes a header, installs the crash/lifecycle watchers and, in Super Debug Mode, dumps the
+ * device environment and starts the heartbeat thread. Call once, right after the launcher. */
+void ios_platform_begin_log(void);
+
+/* Super Debug Mode (the Settings switch, persisted). When on, the engine logs far more: device and GL limits, a GL
+ * self-test, every GL call's error status, a picture probe each few seconds, per-second statistics, lifecycle and
+ * touch events. It costs frame rate; leave it off for normal play. */
+int  ios_super_debug(void);
+void ios_super_debug_set(int on);   /* the launcher's switch: saved, and in effect for this run */
+
+/* Process memory in MB (resident set / still available before iOS ends the app); -1 if unknown. */
+long ios_debug_resident_mb(void);
+long ios_debug_avail_mb(void);
+
+/* Called once per presented frame so the heartbeat thread can tell a stalled render loop from a slow one. */
+void ios_debug_note_frame(unsigned long long frame);
 
 /* Shows a blocking error dialog (and logs it). A phone has no console, so a failed start would otherwise look like
  * a black screen or a silent exit. Safe to call before or after SDL_Init. */

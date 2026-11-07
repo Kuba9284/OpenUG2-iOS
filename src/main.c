@@ -2319,7 +2319,13 @@ int main(int argc, char **argv) {
     const char *dataroot = ".", *shot = NULL, *objdump = NULL, *carinfo = NULL;
 #ifdef OPENUG2_IOS
     dataroot = ios_platform_init();   /* app Documents folder (also the working dir); an explicit DATA_DIR argument still wins */
-    if (!ios_platform_check_data(dataroot)) return 1;   /* no files yet: say where to put them, instead of a blank screen */
+    {   /* native start screen: Play (checks the files) / Settings (Super Debug Mode); returns once Play is tapped */
+        static char launcher_root[1024];
+        if (ios_launcher_run(dataroot, launcher_root, sizeof launcher_root)) dataroot = launcher_root;
+    }
+    ios_platform_begin_log();   /* stderr/stdout -> Documents/openug2.log (the last run's log is kept as openug2-previous.log) */
+    fprintf(stderr, "data folder: %s\n", dataroot);
+    if (!ios_platform_check_data(dataroot)) return 1;   /* belt and braces: the launcher has already checked */
 #endif
     int render_width = 1920, render_height = 1080;
     const char *xaudit = NULL;   /* --transform-audit REGION: GL-free placement forensics */
