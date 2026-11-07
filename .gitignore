@@ -111,3 +111,5 @@ ios/deps/
 ios/build/
 ios/OpenUG2.xcodeproj/
 ios/Info.plist
+# upstream ignores *.png above; the app icon must be tracked
+!ios/Assets.xcassets/AppIcon.appiconset/icon-1024.png
