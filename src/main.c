@@ -68,6 +68,7 @@
 #ifdef OPENUG2_MENU
 #include "frontend/frontend.h"
 #include "frontend/frontend_draw.h"
+#include "main_menu.h"
 #endif
 
 /* Shared gameplay tunables; `make debug` adds their ImGui controls. */
@@ -6367,6 +6368,14 @@ int main(int argc, char **argv) {
         frontend_draw = fed_init();
         if (!frontend_draw) frontend_open = 0;
     }
+    /* The retail main menu (UI_Main.fng from the user's FrontB.lzc). NULL falls back to the placeholder menu. */
+    MainMenu *main_menu = frontend_open ? main_menu_create(dataroot) : NULL;
+    if (main_menu) {
+        main_menu_set_available(main_menu, MM_CAREER, 1);          /* stand-in: free roam (no career progression yet) */
+        main_menu_set_available(main_menu, MM_QUICK_RACE, 1);      /* the car / circuit select */
+        main_menu_set_available(main_menu, MM_CUSTOMIZE_CAR, 1);   /* same select until the shops exist */
+        printf("frontend: retail main menu active\n");
+    } else if (frontend_open) printf("frontend: retail main menu unavailable, placeholder menu\n");
 #endif
     if(g_stage1_requested && !g_stage1.ready) {
         fprintf(stderr,"--drivetrain requires a loaded car with valid stock tuning\n");return 2;
@@ -6585,6 +6594,12 @@ int main(int argc, char **argv) {
 #ifdef OPENUG2_IOS
             if (ios_platform_event(&e)) continue;   /* blocks while backgrounded: no GL there */
 #endif
+#ifdef OPENUG2_MENU
+            if (frontend_open && main_menu && e.type == SDL_FINGERDOWN) {   /* a tap on the retail menu's icon strip */
+                int32_t tw = 1, th = 1; rhi_drawable_size(&tw, &th);
+                main_menu_tap(main_menu, e.tfinger.x, e.tfinger.y, (int)tw, (int)th);
+            }
+#endif
             uint32_t pad_edge = cx_joy_edges(&g_cx, &e);   /* every event, so hat state stays current while paused */
             int pause_allowed = 1;
 #ifdef OPENUG2_MENU
@@ -6667,6 +6682,15 @@ int main(int argc, char **argv) {
 #endif
             if (e.type == SDL_QUIT) running = 0;
 #ifdef OPENUG2_MENU
+            else if (frontend_open && main_menu &&
+                     (e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_MOUSEBUTTONDOWN)) {
+                if (e.type == SDL_MOUSEBUTTONDOWN) {
+                    if (e.button.button == SDL_BUTTON_LEFT) {
+                        int ww = 1, wh = 1; SDL_GetWindowSize(win, &ww, &wh);
+                        main_menu_tap(main_menu, (float)e.button.x / ww, (float)e.button.y / wh, ww, wh);
+                    }
+                } else main_menu_event(main_menu, &e);
+            }
             else if (frontend_open && e.type == SDL_CONTROLLERBUTTONDOWN) {
                 if (e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_UP)
                     fe_input(&frontend, FE_INPUT_UP);
@@ -6725,6 +6749,8 @@ int main(int argc, char **argv) {
                 SDL_Keycode k = e.key.keysym.sym;
                 int kbound = cx_key_bound(&g_cx, (int)e.key.keysym.scancode);   /* developer keys stand back for bindings */
 #ifdef OPENUG2_MENU
+                if (frontend_open && main_menu) main_menu_event(main_menu, &e);
+                else
                 if (frontend_open && !e.key.repeat &&
                     (k == SDLK_UP || k == SDLK_DOWN || k == SDLK_RETURN ||
                      k == SDLK_SPACE || k == SDLK_ESCAPE)) {
@@ -6925,11 +6951,23 @@ int main(int argc, char **argv) {
 
 #ifdef OPENUG2_MENU
         if (frontend_open) {
-            const Uint8 *fks = SDL_GetKeyboardState(NULL);
-            int held = fks[SDL_SCANCODE_DOWN] ? 1 : fks[SDL_SCANCODE_UP] ? -1 : 0;
-            fe_held(&frontend, held, frame_scale/PHYS_TICKRATE);
-            fe_update(&frontend, frame_scale/PHYS_TICKRATE);
-            FeAction action = fe_poll_action(&frontend);
+            FeAction action = FE_ACTION_NONE;
+            if (main_menu) {
+                MainMenuChoice mc = main_menu_update(main_menu, frame_scale/PHYS_TICKRATE);
+                if (mc == MM_CAREER) action = FE_ACTION_FREE_ROAM;
+                else if (mc == MM_QUICK_RACE || mc == MM_CUSTOMIZE_CAR) action = FE_ACTION_RACE_SELECT;
+                if (mc != MM_NONE) {
+                    printf("frontend: main menu choice %d -> action %d\n", (int)mc, (int)action);
+                    main_menu_destroy(main_menu);   /* frees the front-end archive again */
+                    main_menu = NULL;
+                }
+            } else {
+                const Uint8 *fks = SDL_GetKeyboardState(NULL);
+                int held = fks[SDL_SCANCODE_DOWN] ? 1 : fks[SDL_SCANCODE_UP] ? -1 : 0;
+                fe_held(&frontend, held, frame_scale/PHYS_TICKRATE);
+                fe_update(&frontend, frame_scale/PHYS_TICKRATE);
+                action = fe_poll_action(&frontend);
+            }
             if (action == FE_ACTION_QUIT) running = 0;
             else if (action == FE_ACTION_RACE_SELECT) frontend_open = 0;
             else if (action == FE_ACTION_FREE_ROAM) {
@@ -12043,7 +12081,8 @@ int main(int argc, char **argv) {
         if (frontend_open && frontend_draw) {
             int32_t fw, fh;
             rhi_drawable_size(&fw, &fh);
-            fed_draw(frontend_draw, &frontend, fw, fh);
+            if (main_menu) main_menu_draw(main_menu, fw, fh);
+            else fed_draw(frontend_draw, &frontend, fw, fh);
         }
 #endif
         if (pause_menu_is_open(pause_menu)) {
@@ -12151,6 +12190,7 @@ int main(int argc, char **argv) {
     rhi_shader_destroy(dbgshader);
     if (adev) SDL_CloseAudioDevice(adev);
 #ifdef OPENUG2_MENU
+    main_menu_destroy(main_menu);
     fed_free(frontend_draw);
 #endif
     cx_shutdown(&g_cx);
